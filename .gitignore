@@ -1,0 +1,12 @@
+node_modules/
+dist/
+cache/
+out/
+/lib/
+.env
+.env.*
+!.env.example
+config/*.local.json
+runtime/
+*.log
+.DS_Store

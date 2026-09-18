@@ -1,0 +1,38 @@
+{
+  "name": "@aqua0/market-rebalancer-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "contracts:build": "forge build",
+    "contracts:test": "forge test --no-match-path '**/*.fork.t.sol'",
+    "test:fork": "forge test --match-path '**/*.fork.t.sol' -vv",
+    "scan": "node --import tsx src/cli.ts scan",
+    "run": "node --import tsx src/cli.ts run",
+    "doctor": "node --import tsx src/cli.ts doctor",
+    "check": "npm run typecheck && npm test && npm run contracts:test",
+    "test:integration": "node --import tsx --test test/execution.integration.ts",
+    "format": "prettier --write src test scripts/*.ts config/*.json README.md AGENTS.md project-context/*.md && forge fmt contracts",
+    "format:check": "prettier --check src test scripts/*.ts config/*.json README.md AGENTS.md project-context/*.md && forge fmt --check contracts"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "5.5.0",
+    "@openzeppelin/contracts-upgradeable": "5.5.0",
+    "@openzeppelin/uniswap-hooks": "1.2.0",
+    "@uniswap/v4-core": "1.0.2",
+    "viem": "2.55.8",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.0",
+    "prettier": "3.6.2",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
