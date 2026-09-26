@@ -50,3 +50,17 @@ SwapVM round-trip directions on real deployed-router forks, including wrong head
 output floors, rollback and allowance cleanup. Keep failing setup separate from execution evidence.
 No funded live executor, wallet transfer, global execution enablement or production/main change is
 part of this implementation. Preserve the running observer and unrelated staging features.
+
+
+## Release candidate verification and rollout boundary
+
+The automatic-sizing and SwapVM update is committed on `feat/rebalancer-native-swapvm` in all
+three repositories. Backend staging PR593 and frontend staging PR604 are open; worker PR1 is a
+draft for versioned review, not authorization to change production/main. Exact evidence is under
+`evidence/releases/20260926-native-swapvm/verification.json`.
+
+The explicit AWS source-transfer request was blocked by the tool platform. Read-only SSH still
+confirmed the old observer running, but the new image was not built or activated. Do not describe
+this update as deployed. Keep frontend PR604 unmerged until the observer supports the new policy
+shape, or existing approvals would fail against the older worker. No funds, market approvals,
+execution permissions, signing configuration or production deployments were changed.
