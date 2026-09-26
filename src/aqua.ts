@@ -10,6 +10,11 @@ import {
   type Pool,
 } from "./config.js";
 import type { Address, Hex } from "viem";
+import {
+  acceptSwapVMOptimization,
+  type SwapVMSizingRequest,
+} from "./swapvm.js";
+import { acceptOptimizedCandidates, type SizingRequest } from "./sizing.js";
 export const MIN_SQRT = 4295128740n;
 export const MAX_SQRT = 1461446703485210103287273052203988822378723970341n;
 const quoteSchema = z.object({
@@ -63,16 +68,58 @@ export class AquaClient {
     private readonly url: string,
     private readonly headers: Record<string, string> = {},
   ) {}
-  private async post(path: string, body: unknown): Promise<unknown> {
+  private async post(
+    path: string,
+    body: unknown,
+    timeout = 10000,
+  ): Promise<unknown> {
     const response = await fetch(new URL(path, this.url), {
       method: "POST",
       headers: { "content-type": "application/json", ...this.headers },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(timeout),
       redirect: "error",
     });
     if (!response.ok) throw new Error(`Aqua0 ${path} HTTP ${response.status}`);
     return response.json();
+  }
+  async listPools(chain: ChainConfig): Promise<unknown> {
+    const url = new URL("/api/vaults/pools", this.url);
+    url.searchParams.set("chainId", String(chain.chainId));
+    url.searchParams.set("includeArming", "true");
+    const response = await fetch(url, {
+      headers: { ...this.headers },
+      signal: AbortSignal.timeout(12000),
+      redirect: "error",
+    });
+    if (!response.ok)
+      throw new Error(`Public V4 discovery HTTP ${response.status}`);
+    if (
+      !response.headers
+        .get("content-type")
+        ?.toLowerCase()
+        .includes("application/json")
+    )
+      throw new Error("Public V4 discovery returned non-JSON data");
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("Public V4 discovery returned an empty body");
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      while (true) {
+        const part = await reader.read();
+        if (part.done) break;
+        size += part.value.length;
+        if (size > 4 * 1024 * 1024)
+          throw new Error(
+            "Public V4 discovery exceeds the bounded response size",
+          );
+        chunks.push(part.value);
+      }
+      return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
   }
   private body(
     chain: ChainConfig,
@@ -97,6 +144,65 @@ export class AquaClient {
         : { requestedAmount1: amount.toString() }),
     };
   }
+  async listSwapVM(chain: ChainConfig): Promise<unknown> {
+    const endpoint = new URL("/api/swap/aqua-markets", this.url);
+    endpoint.searchParams.set("chainId", String(chain.chainId));
+    const response = await fetch(endpoint, {
+      headers: this.headers,
+      signal: AbortSignal.timeout(25000),
+      redirect: "error",
+    });
+    if (!response.ok)
+      throw new Error(`SwapVM discovery HTTP ${response.status}`);
+    return response.json();
+  }
+  async optimizeSwapVM(request: SwapVMSizingRequest) {
+    const quotedAt = Date.now();
+    const raw = await this.post(
+      "/api/swap/optimize-aqua-round-trip",
+      {
+        venue: "aqua",
+        chainId: request.chain.chainId,
+        stableStrategyId: request.market.stableStrategyId,
+        caller: request.caller,
+        baseToken: request.policy.baseToken,
+        externalPool: request.external.address,
+        externalFactory: request.external.venue.factory,
+        maxInput: request.maxInput.toString(),
+        gasBudget: request.gasBudget.toString(),
+        minNetProfit: request.policy.minNetProfit,
+        slippageBps: request.slippageBps,
+        ...(request.fixedAmount === undefined
+          ? {}
+          : { fixedAmount: request.fixedAmount.toString() }),
+      },
+      30000,
+    );
+    return acceptSwapVMOptimization(raw, request, quotedAt);
+  }
+
+  async optimize(request: Omit<SizingRequest, "quotedAt">) {
+    const quotedAt = Date.now();
+    const { chain, pool, market, external } = request;
+    const raw = await this.post("/api/swap/optimize-round-trip", {
+      venue: "v4",
+      chainId: chain.chainId,
+      poolId: pool.poolId,
+      classId: market.classId.toString(),
+      token0: pool.currency0,
+      token1: pool.currency1,
+      tickSpacing: pool.tickSpacing,
+      baseToken: market.baseToken,
+      externalPool: external.address,
+      externalFactory: external.venue.factory,
+      maxInput: request.maxInput.toString(),
+      minNetProfit: market.minNetProfit.toString(),
+      gasBudget: request.gasBudget.toString(),
+      slippageBps: request.slippageBps,
+    });
+    return acceptOptimizedCandidates(raw, { ...request, quotedAt });
+  }
+
   async quote(
     chain: ChainConfig,
     pool: Pool,

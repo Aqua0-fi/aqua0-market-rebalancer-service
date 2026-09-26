@@ -4,7 +4,7 @@ pragma solidity 0.8.34;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
+import {SwapVMVenue} from "./SwapVMVenue.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 struct PoolKey {
@@ -39,7 +39,7 @@ interface IV3Pool {
 /// @notice Prefunded, atomic two-leg rebalancing. An operator can only exchange allowlisted pairs;
 /// owner controls custody, limits and venues. Profits stay in this contract until owner withdrawal.
 /// @dev Standard ERC20s only. No bridges, flash loans, native currency, arbitrary calls or delegatecalls.
-contract MarketRebalancer is Ownable2Step, ReentrancyGuard {
+contract MarketRebalancer is SwapVMVenue, ReentrancyGuard {
     using SafeERC20 for IERC20;
     uint160 private constant MIN_SQRT = 4295128740;
     uint160 private constant MAX_SQRT = 1461446703485210103287273052203988822378723970341;
@@ -47,7 +47,8 @@ contract MarketRebalancer is Ownable2Step, ReentrancyGuard {
 
     enum Venue {
         Aqua0V4,
-        V3
+        V3,
+        AquaSwapVM
     }
 
     struct Leg {
@@ -209,8 +210,9 @@ contract MarketRebalancer is Ownable2Step, ReentrancyGuard {
         Leg calldata a = trade.first;
         Leg calldata b = trade.second;
         if (
-            a.tokenIn == a.tokenOut || a.tokenIn != b.tokenOut || a.tokenOut != b.tokenIn || a.venue == b.venue
-                || a.amountIn == 0 || b.amountIn == 0 || a.minOut == 0 || b.minOut == 0
+            a.tokenIn == a.tokenOut || a.tokenIn != b.tokenOut || a.tokenOut != b.tokenIn
+                || ((a.venue == Venue.V3) == (b.venue == Venue.V3)) || a.amountIn == 0 || b.amountIn == 0
+                || a.minOut == 0 || b.minOut == 0
         ) revert InvalidRoute();
         Limit memory limit = limits[a.tokenIn];
         if (a.amountIn > limit.maxInput || trade.minProfit < limit.minProfit || trade.minProfit == 0) {
@@ -263,6 +265,13 @@ contract MarketRebalancer is Ownable2Step, ReentrancyGuard {
             IUniversalRouter(universalRouter).execute(hex"10", inputs, deadline);
             IPermit2(permit2).approve(leg.tokenIn, universalRouter, 0, 0);
             IERC20(leg.tokenIn).forceApprove(permit2, 0);
+        } else if (leg.venue == Venue.AquaSwapVM) {
+            // The V4-only ABI slot is empty, not fabricated pool metadata, for a SwapVM leg.
+            if (
+                leg.pool.currency0 != address(0) || leg.pool.currency1 != address(0) || leg.pool.fee != 0
+                    || leg.pool.tickSpacing != 0 || leg.pool.hooks != address(0)
+            ) revert InvalidRoute();
+            _executeSwapVM(leg.target, leg.tokenIn, leg.tokenOut, leg.amountIn, leg.minOut, leg.hookData, beforeOut);
         } else {
             V3Approval memory approved = v3Pools[leg.target];
             if (

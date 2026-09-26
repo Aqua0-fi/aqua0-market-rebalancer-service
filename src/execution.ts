@@ -6,26 +6,36 @@ import {
   type PublicClient,
   type Hex,
 } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
+import { workerAccount } from "./worker-account.js";
+import type { KmsTransport } from "./kms-account.js";
 import { executorAbi } from "./abi.js";
 import { rpcUrl, same, type ChainConfig, type Settings } from "./config.js";
 import { assertFresh, ceilDiv, type Candidate } from "./strategy.js";
 import { assertAdditionalFeeReserve } from "./fees.js";
 import { Journal } from "./state.js";
+import { HistoryStore } from "./history.js";
+import { preparedExecution, executionReceipt } from "./execution-history.js";
 export async function submit(
   client: PublicClient,
   chain: ChainConfig,
   settings: Settings,
   candidate: Candidate,
   journal: Journal,
+  history?: HistoryStore,
+  kmsTransport?: KmsTransport,
+  beforeBroadcast?: () => void,
 ): Promise<Hex> {
   const config = settings.execution[String(chain.chainId)];
   if (settings.mode !== "execute" || !config?.allowBroadcast)
     throw new Error("Broadcast disabled");
-  const raw = process.env[config.privateKeyEnv];
-  if (!raw || !/^0x[0-9a-fA-F]{64}$/.test(raw))
-    throw new Error("Missing dedicated operator key");
-  const account = privateKeyToAccount(raw as Hex);
+  if (!chain.executionReviewed || chain.feeModel === "unsupported")
+    throw new Error("Chain execution capability is not reviewed");
+  const account = await workerAccount(
+    chain.chainId,
+    config,
+    process.env,
+    kmsTransport,
+  );
   if (!same(account.address, config.operator))
     throw new Error("Operator key mismatch");
   const [paused, operator, router, hook, permit2, limit, extended] =
@@ -84,6 +94,46 @@ export async function submit(
     throw new Error("Onchain risk limit mismatch");
   if ((await client.getChainId()) !== chain.chainId)
     throw new Error("RPC chain changed before submission");
+  if (candidate.swapVM) {
+    const venue = candidate.swapVM;
+    const capability = await client.readContract({
+      address: config.executor,
+      abi: executorAbi,
+      functionName: "supportsAquaSwapVM",
+    });
+    if (!capability)
+      throw new Error("This executor version has no SwapVM support");
+    const key = await client.readContract({
+      address: config.executor,
+      abi: executorAbi,
+      functionName: "swapVMStrategyKey",
+      args: [venue.router, venue.maker, venue.stableStrategyId],
+    });
+    const [routerPolicy, strategyPolicy] = await Promise.all([
+      client.readContract({
+        address: config.executor,
+        abi: executorAbi,
+        functionName: "swapVMRouters",
+        args: [venue.router],
+      }),
+      client.readContract({
+        address: config.executor,
+        abi: executorAbi,
+        functionName: "swapVMStrategies",
+        args: [key],
+      }),
+    ]);
+    if (
+      !routerPolicy[3] ||
+      !strategyPolicy[3] ||
+      !same(routerPolicy[0], venue.aqua) ||
+      routerPolicy[2] !== venue.slices ||
+      strategyPolicy[2] !== venue.classId
+    )
+      throw new Error(
+        "SwapVM execution is not owner-approved for this strategy/router",
+      );
+  }
   const gasPrice = ceilDiv((await client.getGasPrice()) * 120n, 100n);
   if (gasPrice > config.maxFeePerGas) throw new Error("Gas price cap exceeded");
   const onchainGasCap = await client.readContract({
@@ -189,9 +239,11 @@ export async function submit(
     gasPrice,
     nonce,
   });
+  beforeBroadcast?.();
   const hash = keccak256(signed);
   const journalKey = `${chain.chainId}:${account.address.toLowerCase()}`;
   // Persist the deterministic hash BEFORE broadcast. An uncertain response cannot cause a second send.
+  history?.prepare(preparedExecution(chain, settings, candidate, hash));
   journal.reserve(
     journalKey,
     hash,
@@ -199,8 +251,10 @@ export async function submit(
     candidate.trade.id,
     gas * gasPrice + config.l1FeeReserveWei,
     config.maxDailyGasWei,
+    history !== undefined,
   );
   await client.sendRawTransaction({ serializedTransaction: signed });
+  history?.acknowledgeBroadcast(settings.networkMode, chain.chainId, hash);
   return hash;
 }
 export async function reconcile(
@@ -208,6 +262,7 @@ export async function reconcile(
   chain: ChainConfig,
   settings: Settings,
   journal: Journal,
+  history?: HistoryStore,
 ): Promise<boolean> {
   const config = settings.execution[String(chain.chainId)];
   if (!config) return true;
@@ -225,6 +280,23 @@ export async function reconcile(
       blockNumber: receipt.blockNumber,
     });
     if (canonical.hash !== receipt.blockHash) return false;
+    // A failed history write keeps the pending hash locked for reconciliation on the next scan.
+    const prepared = history?.get(
+      settings.networkMode,
+      chain.chainId,
+      e.pending.hash,
+    );
+    if (e.pending.historyRequired && !prepared)
+      throw new Error("Required execution history is missing");
+    if (prepared && history) {
+      history.settle(
+        settings.networkMode,
+        chain.chainId,
+        e.pending.hash,
+        receipt.status === "success" ? "confirmed" : "reverted",
+        executionReceipt(prepared, receipt, canonical.timestamp, chain),
+      );
+    }
     const { pending: _, ...rest } = e;
     journal.set(key, {
       ...rest,

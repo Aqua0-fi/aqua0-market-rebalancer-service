@@ -6,7 +6,7 @@ import {
   type PublicClient,
 } from "viem";
 import { ceilDiv } from "./strategy.js";
-import type { ChainConfig } from "./config.js";
+import { same, type ChainConfig } from "./config.js";
 const gasOracle = "0x420000000000000000000000000000000000000F";
 const feeAbi = parseAbi([
   "function getL1Fee(bytes transaction) view returns (uint256)",
@@ -21,6 +21,8 @@ export async function assertAdditionalFeeReserve(
   reserve: bigint,
   bufferBps: number,
 ): Promise<void> {
+  if (chain.feeModel === "unsupported")
+    throw new Error("Network fee model is unsupported");
   if (chain.feeModel === "gas-limit") return;
   const unsigned = serializeTransaction({
     ...tx,
@@ -43,4 +45,30 @@ export async function assertAdditionalFeeReserve(
   ]);
   if (ceilDiv((l1 + operator) * BigInt(bufferBps), 10000n) > reserve)
     throw new Error("Additional network fees exceed reserved budget");
+}
+
+/** Convert native gas units to the configured quote token before requesting a market price.
+ * A native stablecoin can have different decimals from its ERC20 representation.
+ * Round UP: a sub-micro-USDC network cost must not disappear from the profit floor.
+ */
+export function nativeCostForQuote(
+  chain: ChainConfig,
+  configuredToken: Address,
+  nativeCost: bigint,
+): { token: Address; amount: bigint } {
+  if (nativeCost < 0n) throw new Error("Negative native gas cost");
+  const equivalent = chain.nativeEquivalent;
+  if (!equivalent) return { token: configuredToken, amount: nativeCost };
+  if (!chain.nativeCurrency) throw new Error("Native gas decimals are unknown");
+  if (!same(configuredToken, equivalent.token))
+    throw new Error(
+      "Configured gas token does not match native-token representation",
+    );
+  return {
+    token: equivalent.token,
+    amount: ceilDiv(
+      nativeCost * 10n ** BigInt(equivalent.decimals),
+      10n ** BigInt(chain.nativeCurrency.decimals),
+    ),
+  };
 }

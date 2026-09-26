@@ -19,6 +19,7 @@ const entry = z.object({
       hash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
       nonce: z.number().int().nonnegative(),
       id: z.string(),
+      historyRequired: z.boolean().optional(),
     })
     .optional(),
 });
@@ -70,6 +71,7 @@ export class Journal {
     id: string,
     cost: bigint,
     maximum: bigint,
+    historyRequired = false,
   ): void {
     const e = this.get(key);
     if (e.pending)
@@ -81,7 +83,7 @@ export class Journal {
       ...e,
       day,
       reservedWei: (spent + cost).toString(),
-      pending: { hash, nonce, id },
+      pending: { hash, nonce, id, historyRequired },
     });
   }
 }
