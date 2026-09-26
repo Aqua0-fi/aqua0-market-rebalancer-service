@@ -13,7 +13,7 @@ and `/api/swap/authorize` for the fleet V4 path. Source review confirmed `sameCh
 fleet quote planner. External pricing comes from onchain Uniswap/Sushi V3 QuoterV2 calls at a pinned
 RPC block. The service does not hold protocol signing keys or modify upstream vaults.
 
-Runtime is one Node process, an embedded SQLite execution-history file, no separate database/indexer/Redis service, bounded sequential work, persistent
+Runtime is one Node process, an embedded SQLite execution-history file, no separate database/indexer/Redis service, bounded independent per-chain work, persistent
 JSON transaction journal and loopback health endpoint. The contract uses prefunded operating inventory.
 Fork tests independently instantiate real Aqua0 source, use real deployed market infrastructure and
 synthetically displace the local Aqua0 pool price to prove a profitable route can settle.
@@ -33,3 +33,9 @@ quotes with a real caller and independent owner-controlled onchain allowlists. D
 updates never imply funding or execution activation. The generated worker registry must include
 canonical SwapVM bindings and known router header widths; run `scripts/sync-registry.ts` against the
 specific backend source revision instead of hand-copying addresses.
+
+The reactive-loop branch replaces sleep-after-all-chains scheduling with independent new-head lanes,
+bounded per-chain quote concurrency, queued-state invalidation and latest-state whole-trade checks.
+Pool caches retain verified math data, not LP approvals or available shared backing. Global/per-chain
+pause controls and live reporting are implemented but not deployed merely by being present in source.
+Read `reactive-loop-plan.md` and the release evidence before continuing or making performance claims.

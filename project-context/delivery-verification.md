@@ -1,5 +1,10 @@
 # Implementation delivery and verification
 
+Latest release: consult `evidence/releases/reactive-loop/release.json` and
+`reactive-loop-plan.md` for the current staging backend, observer image and admin UI verification.
+Dated checkpoints below describe their own source revisions and do not override that release record.
+No local benchmark or staging rollout establishes funded production profitability.
+
 ## Delivered state
 
 The requested implementation is complete in the isolated worktrees under

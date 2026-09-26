@@ -98,7 +98,42 @@ adaptive multi-bracket exploration. That result is the best actually evaluated s
 of a global optimum for an arbitrary program. Both venue orders are compared. The worker refreshes
 only the selected opportunity and simulates the complete atomic transaction before signing.
 
-The observer configuration sleeps 15 seconds after each scan; the interval between starts also
-includes scan duration. Discovery refreshes approximately every two minutes. This is not yet a
-per-block/event-triggered engine. Configured quote-fee budgets and an intended SwapVM caller are
-necessary for economic observation; policy approval alone does not enable execution.
+The earlier deployed observer used a 15-second sleep after each scan. This source branch replaces
+that loop with the new-block scheduler described below; a rollout record is required before assuming
+the running host uses it. Discovery is separate from price work. Configured quote-fee budgets and
+an intended SwapVM caller remain necessary for economic observation; allowing a pair does not enable trading.
+
+## New-block reaction and live controls
+
+`run` no longer sleeps after a combined all-chain scan. Each configured chain receives its own new
+block notifications (explicit WebSocket connection or a 500 ms HTTP header fallback). Discovery is
+separate from price checks. Ready opportunities enter one execution lane per chain; older queued
+prices are discarded on changed shared state, and the selected route is rechecked using current
+backing, prices and a whole-transaction simulation.
+
+The protected admin dashboard reports current mode, per-chain work, block connections, queued work,
+measured timings, recent decisions and transaction history. Global/per-chain pauses persist across
+restart and never stop reconciliation of a transaction already sent. They cannot deploy, fund or
+implicitly enable trading. See [reactive-loop plan and evidence](project-context/reactive-loop-plan.md).
+
+Optional scheduling configuration (all values are explicit worker limits, not profit guarantees):
+
+```json
+{
+  "scheduling": {
+    "headerPollMs": 500,
+    "websocketAuditMs": 5000,
+    "maxConcurrentChains": 4,
+    "maxScanMs": 8000,
+    "maxScanBlockLag": 8,
+    "websocketEnv": { "8453": "BASE_REBALANCER_WS_URL" }
+  }
+}
+```
+
+Only name a WebSocket variable when it is actually provisioned. Missing variables use the HTTP
+fallback and report the condition. Neither subscriptions nor passing local tests establish live
+competitiveness; RPC latency, opportunity size, execution fees and inclusion still need measurement.
+
+`npm run test:heads` runs real local Anvil HTTP/WebSocket notification tests. `npm run test:integration`
+checks the actual local signing/sending/receipt flow and cancellation before transmission.

@@ -268,6 +268,50 @@ for (const signerMode of ["local", "kms"] as const) {
         history.list({ network: "fork", limit: 10 }).matchedCount,
         0,
       );
+      assert.equal(
+        signing.digests.length,
+        0,
+        "revocation before work must not even request a signature",
+      );
+      const nonceBefore = await client.getTransactionCount({
+        address: account.address,
+      });
+      for (const stopAt of [2, 3]) {
+        let checks = 0;
+        await assert.rejects(
+          () =>
+            submit(
+              client,
+              chain,
+              config,
+              candidate,
+              journal,
+              history,
+              signerMode === "kms" ? signing.transport : undefined,
+              () => {
+                checks++;
+                if (checks === stopAt)
+                  throw new Error("Shared state changed before transmission");
+              },
+            ),
+          /Shared state changed/,
+        );
+        assert.equal(checks, stopAt);
+        assert.equal(
+          journal.get(`31337:${account.address.toLowerCase()}`).pending,
+          undefined,
+        );
+        assert.equal(
+          history.list({ network: "fork", limit: 10 }).matchedCount,
+          0,
+        );
+        assert.equal(
+          await client.getTransactionCount({ address: account.address }),
+          nonceBefore,
+          "cancelled work must not spend a nonce",
+        );
+      }
+      const signedBefore = signing.digests.length;
       const hash = await submit(
         client,
         chain,
@@ -277,7 +321,10 @@ for (const signerMode of ["local", "kms"] as const) {
         history,
         signerMode === "kms" ? signing.transport : undefined,
       );
-      assert.equal(signing.digests.length, signerMode === "kms" ? 2 : 0);
+      assert.equal(
+        signing.digests.length - signedBefore,
+        signerMode === "kms" ? 1 : 0,
+      );
       history.close();
       history = new HistoryStore(join(dir, "history.sqlite"));
       assert.equal(history.get("fork", 31337, hash)?.status, "pending");

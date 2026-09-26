@@ -1,5 +1,14 @@
 # Staging rollout checkpoint
 
+## Latest deployment record
+
+The 2026-09-26 reactive release supersedes the earlier checkpoints below. Exact current revisions,
+image identity, successful Railway deployments and protected UI verification are recorded in
+`evidence/releases/reactive-loop/release.json` and `project-context/reactive-loop-plan.md`.
+The older dated entries are retained as history, not instructions to replay an already-completed
+configuration or deployment. The bot remains observe-only; a staging update does not authorize
+funding, new pair permissions or live trading.
+
 ## Scope
 
 Continue the owner-authorized observer deployment and staging admin integration. Do not deploy or
@@ -21,7 +30,7 @@ as a side effect of verifying the dashboard.
 - The existing staging deployments still served those bases when inspected. They did not yet contain
   the Rebalancer panel or backend integration.
 
-## Published work, not yet a deployment claim
+## Earlier publication checkpoint (historical)
 
 - Backend PR 578 in Aqua0-fi/backend, base staging, head `feat/rebalancer-parity-attribution`.
   Current head at this checkpoint: `9fc3da3b1a9cb451ccd3d5afe76082c7d219a616`.
@@ -44,7 +53,7 @@ as a side effect of verifying the dashboard.
   general path was disabled. The full local scan then passed. The updated CI scan still needs its
   own result; do not assume it is equivalent to the local scan.
 
-## Exact next steps
+## Earlier rollout steps (completed for the 2026-09-25 release)
 
 1. Finish all current PR checks. Read failure logs and correct actual issues without waiving gates.
 2. Refresh staging refs. Preserve any new teammate commits and confirm both PR bases remain staging.

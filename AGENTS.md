@@ -10,8 +10,9 @@ Read `project-context/agent-context.md`, `project-context/debugging-issues.md`,
 - Reverts preserve trade principal but consume gas. Include chain-specific fees, budgets and this
   limitation in any profitability claim.
 - No implicit live broadcasting. Existing mainnet deployment, funding, strategy approval, credentials
-  and explicit configuration are prerequisites. Current user scope is implementation and fork tests;
-  hosting and production activation come later.
+  and explicit configuration are prerequisites. The existing staging applications and AWS observe-only
+  service are authorized and deployed. Their update is not permission to fund an executor, approve a
+  pair, enable trading or promote production/main. Read the latest release record before a rollout.
 - Never expose keys, log raw authenticated RPC URLs, copy sibling `.env` files, or use protocol signer
   keys as rebalancer operator keys.
 - Do not edit `vendor/aqua0/src`. Update its exact source snapshot and provenance together if needed.

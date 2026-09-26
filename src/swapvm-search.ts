@@ -1,9 +1,10 @@
+import { forEachConcurrent } from "./opportunity-queue.js";
 import { erc20Abi, type Address, type PublicClient } from "viem";
 import { executorAbi } from "./abi.js";
 import { nativeCostForQuote } from "./fees.js";
 import { same, type ChainConfig, type Settings } from "./config.js";
 import { assertFresh, ceilDiv, type Candidate } from "./strategy.js";
-import { discover, quoteV3, type ExternalPool } from "./venues.js";
+import { discoverCached, quoteV3, type ExternalPool } from "./venues.js";
 import type { AquaClient } from "./aqua.js";
 import type { SwapVMMarketCatalog } from "./swapvm-catalog.js";
 import type { SwapVMMarket } from "./swapvm.js";
@@ -19,6 +20,10 @@ export interface SwapVMChoice {
   inputCap: bigint;
 }
 interface SearchContext {
+  bindSnapshot?: ((number: bigint, hash: `0x${string}`) => void) | undefined;
+  onCandidate?: ((choice: SwapVMChoice) => void) | undefined;
+  signal?: AbortSignal | undefined;
+  check?: (() => void) | undefined;
   client: PublicClient;
   chain: ChainConfig;
   settings: Settings;
@@ -83,80 +88,105 @@ export async function collectSwapVMChoices(
     return [];
   }
   const choices: SwapVMChoice[] = [];
-  for (const { market, policy: supplied } of markets) {
-    const policy = supplied!;
-    const startToken = policy.baseToken as Address;
-    const block = await client.getBlock();
-    let inputCap = BigInt(policy.maxInput);
-    if (inputCap >= 1n << 128n) inputCap = (1n << 128n) - 1n;
-    if (settings.mode === "execute") {
-      if (!execution) throw new Error("No funded execution configuration");
-      const [balance, limit] = await Promise.all([
-        client.readContract({
-          address: startToken,
-          abi: erc20Abi,
-          functionName: "balanceOf",
-          args: [execution.executor],
-          blockNumber: block.number,
-        }),
-        client.readContract({
-          address: execution.executor,
-          abi: executorAbi,
-          functionName: "limits",
-          args: [startToken],
-          blockNumber: block.number,
-        }),
-      ]);
-      if (balance < inputCap) inputCap = balance;
-      if (limit[0] < inputCap) inputCap = limit[0];
-    }
-    if (inputCap <= 0n) continue;
-    const pools = await discover(
-      client,
-      chain,
-      { currency0: market.token0, currency1: market.token1 },
-      block.number,
-    );
-    for (const external of pools) {
-      try {
-        catalog.assertApproved(market, policy);
-        const gasBudget = await swapVMGasBudget(context, startToken, external);
-        const result = await aqua.optimizeSwapVM({
-          chain,
-          market,
-          policy,
-          external,
-          caller,
-          network: settings.networkMode,
-          maxInput: inputCap,
-          gasBudget,
-          slippageBps: settings.slippageBps,
-        });
-        context.onEvent("swapvm_automatic_sizing", {
-          chainId: chain.chainId,
-          strategyId: market.stableStrategyId,
-          externalPool: external.address,
-          searches: result.searches,
-        });
-        for (const candidate of result.candidates)
-          choices.push({
-            kind: "aqua",
-            candidate,
-            startToken,
-            market,
-            policy,
-            external,
-            inputCap,
-          });
-      } catch {
-        context.onEvent("swapvm_sizing_rejected", {
-          chainId: chain.chainId,
-          strategyId: market.stableStrategyId,
-          externalPool: external.address,
-        });
+  await forEachConcurrent(
+    markets,
+    2,
+    async ({ market, policy: supplied }) => {
+      if (context.signal?.aborted) return;
+      context.check?.();
+      const policy = supplied!;
+      const startToken = policy.baseToken as Address;
+      const block = await client.getBlock();
+      let inputCap = BigInt(policy.maxInput);
+      if (inputCap >= 1n << 128n) inputCap = (1n << 128n) - 1n;
+      if (settings.mode === "execute") {
+        if (!execution) throw new Error("No funded execution configuration");
+        const [balance, limit] = await Promise.all([
+          client.readContract({
+            address: startToken,
+            abi: erc20Abi,
+            functionName: "balanceOf",
+            args: [execution.executor],
+            blockNumber: block.number,
+          }),
+          client.readContract({
+            address: execution.executor,
+            abi: executorAbi,
+            functionName: "limits",
+            args: [startToken],
+            blockNumber: block.number,
+          }),
+        ]);
+        if (balance < inputCap) inputCap = balance;
+        if (limit[0] < inputCap) inputCap = limit[0];
       }
-    }
-  }
+      if (inputCap <= 0n) return;
+      const pools = await discoverCached(
+        client,
+        chain,
+        { currency0: market.token0, currency1: market.token1 },
+        block.number,
+      );
+      await forEachConcurrent(
+        pools,
+        2,
+        async (external) => {
+          if (context.signal?.aborted) return;
+          try {
+            context.check?.();
+            catalog.assertApproved(market, policy);
+            const gasBudget = await swapVMGasBudget(
+              context,
+              startToken,
+              external,
+            );
+            const result = await aqua.optimizeSwapVM({
+              chain,
+              market,
+              policy,
+              external,
+              caller,
+              network: settings.networkMode,
+              maxInput: inputCap,
+              gasBudget,
+              slippageBps: settings.slippageBps,
+              signal: context.signal,
+            });
+            context.check?.();
+            context.onEvent("swapvm_automatic_sizing", {
+              chainId: chain.chainId,
+              strategyId: market.stableStrategyId,
+              externalPool: external.address,
+              searches: result.searches,
+            });
+            for (const candidate of result.candidates) {
+              if (context.signal?.aborted) return;
+              const choice: SwapVMChoice = {
+                kind: "aqua",
+                candidate,
+                startToken,
+                market,
+                policy,
+                external,
+                inputCap,
+              };
+              choices.push(choice);
+              context.onCandidate?.(choice);
+            }
+          } catch {
+            if (context.signal?.aborted) return;
+            context.onEvent("swapvm_sizing_rejected", {
+              chainId: chain.chainId,
+              strategyId: market.stableStrategyId,
+              externalPool: external.address,
+            });
+          }
+        },
+        context.signal,
+      );
+    },
+    context.signal,
+  );
   return choices;
 }
 
@@ -175,6 +205,30 @@ export async function refreshSwapVMChoice(
     choice.startToken,
     choice.external,
   );
+  const fresh = await client.getBlock();
+  const [balance, limit] = await Promise.all([
+    client.readContract({
+      address: choice.startToken,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [execution.executor],
+      blockNumber: fresh.number,
+    }),
+    client.readContract({
+      address: execution.executor,
+      abi: executorAbi,
+      functionName: "limits",
+      args: [choice.startToken],
+      blockNumber: fresh.number,
+    }),
+  ]);
+  const cap = [
+    BigInt(choice.policy.maxInput),
+    balance,
+    limit[0],
+    (1n << 128n) - 1n,
+  ].reduce((a, b) => (a < b ? a : b));
+  if (cap <= 0n) return null;
   const result = await aqua.optimizeSwapVM({
     chain,
     market: choice.market,
@@ -182,14 +236,15 @@ export async function refreshSwapVMChoice(
     external: choice.external,
     caller: execution.executor,
     network: settings.networkMode,
-    maxInput: choice.inputCap,
+    maxInput: cap,
+    executionPriority: true,
     gasBudget,
     slippageBps: settings.slippageBps,
-    fixedAmount: choice.candidate.trade.first.amountIn,
+    signal: context.signal,
+    // Recompute the size too: shared backing and the external market may both have moved.
   });
-  const candidate = result.candidates.find(
-    (item) => item.aquaFirst === choice.candidate.aquaFirst,
-  );
+  context.check?.();
+  const candidate = result.candidates[0];
   if (!candidate) return null;
   assertFresh(
     candidate,
@@ -203,6 +258,8 @@ export async function refreshSwapVMChoice(
     candidate.quoteBlockHash
   )
     throw new Error("Refreshed SwapVM quote block reorganized");
+  if (candidate.quoteBlockHash)
+    context.bindSnapshot?.(candidate.blockNumber, candidate.quoteBlockHash);
   catalog.assertApproved(choice.market, choice.policy);
   return candidate;
 }

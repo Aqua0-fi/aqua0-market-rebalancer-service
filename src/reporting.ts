@@ -1,3 +1,4 @@
+import { RuntimeControls, runtimeChangeSchema } from "./runtime-controls.js";
 import {
   createServer,
   type IncomingMessage,
@@ -10,6 +11,8 @@ import type { SwapVMMarketCatalog } from "./swapvm-catalog.js";
 import { MarketCatalog, marketPolicyInput } from "./market-catalog.js";
 
 export interface ReportOptions {
+  controls?: RuntimeControls | undefined;
+  onPolicyChanged?: ((chainId: number) => void) | undefined;
   network: "mainnet" | "fork";
   token?: string | undefined;
   controlToken?: string | undefined;
@@ -72,6 +75,62 @@ export function createReportServer(options: ReportOptions) {
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
+      if (req.method === "POST" && url.pathname === "/v1/runtime") {
+        if (!controlsAuthorized(req)) {
+          send(res, 401, {
+            error: "Separate operator-control credential required",
+          });
+          return;
+        }
+        if (!options.controls) {
+          send(res, 503, { error: "Runtime controls are unavailable" });
+          return;
+        }
+        if (!req.headers["content-type"]?.startsWith("application/json")) {
+          send(res, 415, { error: "JSON body required" });
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const part of req) {
+          const buffer = Buffer.from(part);
+          size += buffer.length;
+          if (size > 2048) {
+            send(res, 413, { error: "Control request is too large" });
+            return;
+          }
+          chunks.push(buffer);
+        }
+        const body = z
+          .object({
+            network: z.literal(options.network),
+            actor: z.string().min(1).max(120),
+            change: runtimeChangeSchema,
+          })
+          .strict()
+          .parse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        try {
+          const state = options.controls.change(body.change, body.actor);
+          if (body.change.chainId)
+            options.onPolicyChanged?.(body.change.chainId);
+          else options.onPolicyChanged?.(0);
+          send(res, 200, {
+            version: 1,
+            state,
+            tradingPermissionsChanged: false,
+          });
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            error.message.startsWith("Control version conflict")
+          ) {
+            send(res, 409, { error: error.message });
+            return;
+          }
+          throw error;
+        }
+        return;
+      }
       const controlPath =
         /^\/v1\/(markets|aqua-markets)\/(\d+)\/(0x[0-9a-fA-F]{64})\/policy$/.exec(
           url.pathname,
@@ -126,6 +185,7 @@ export function createReportServer(options: ReportOptions) {
             body.policy,
             body.actor,
           );
+          options.onPolicyChanged?.(chainId);
           send(res, 200, {
             version: 1,
             policy,
@@ -199,7 +259,10 @@ export function createReportServer(options: ReportOptions) {
         return;
       }
       if (url.pathname === "/v1/status") {
-        send(res, 200, options.status());
+        send(res, 200, {
+          ...(options.status() as object),
+          runtimeControlAvailable: !!options.controls && !!controlHash,
+        });
         return;
       }
       if (url.pathname === "/v1/executions") {

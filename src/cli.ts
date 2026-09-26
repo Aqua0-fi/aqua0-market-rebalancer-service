@@ -1,3 +1,5 @@
+import { RuntimeControls } from "./runtime-controls.js";
+import { runReactive } from "./reactive-runner.js";
 import { loadRuntimeSecrets } from "./runtime-secrets.js";
 import { readFileSync, statSync } from "node:fs";
 import type { Server } from "node:http";
@@ -6,7 +8,6 @@ import { SwapVMMarketCatalog } from "./swapvm-catalog.js";
 import { MarketCatalog } from "./market-catalog.js";
 import { createReportServer } from "./reporting.js";
 import { parseArgs } from "node:util";
-import { setTimeout as sleep } from "node:timers/promises";
 import { loadChains, loadSettings } from "./config.js";
 import { AquaClient } from "./aqua.js";
 import { Runner, log, safeError } from "./runner.js";
@@ -128,9 +129,10 @@ if (command === "doctor") {
   let catalog: MarketCatalog | undefined;
   let swapVMCatalog: SwapVMMarketCatalog | undefined;
   let server: Server | undefined;
-  let stopping = false;
+  let controls: RuntimeControls | undefined;
+  const shutdown = new AbortController();
   const stop = () => {
-    stopping = true;
+    shutdown.abort();
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
@@ -152,6 +154,11 @@ if (command === "doctor") {
         Date.now,
         settings.discovery.maxAgeMs,
       );
+    controls = new RuntimeControls(
+      "runtime/controls.sqlite",
+      settings.networkMode,
+      chains.map((c) => c.chainId),
+    );
     const runner = new Runner(
       chains,
       settings,
@@ -160,6 +167,7 @@ if (command === "doctor") {
       history,
       catalog,
       swapVMCatalog,
+      controls,
     );
     if (command === "run") {
       server = createReportServer({
@@ -168,6 +176,8 @@ if (command === "doctor") {
         controlToken: process.env.REBALANCER_CONTROL_TOKEN,
         catalog,
         swapVMCatalog,
+        controls,
+        onPolicyChanged: (id) => runner.marketChanged(id),
         hostHealth: () => {
           const path = process.env.REBALANCER_HOST_HEALTH_FILE;
           if (!path)
@@ -204,17 +214,15 @@ if (command === "doctor") {
         server!.listen(port, host, resolve);
       });
     }
-    do {
-      await runner.scan();
-      if (command === "scan" || stopping) break;
-      await sleep(settings.pollMs);
-    } while (!stopping);
+    if (command === "scan") await runner.scan();
+    else await runReactive(runner, chains, settings, shutdown.signal);
   } finally {
     if (server?.listening)
       await new Promise<void>((resolve) => server!.close(() => resolve()));
     history?.close();
     catalog?.close();
     swapVMCatalog?.close();
+    controls?.close();
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     release();

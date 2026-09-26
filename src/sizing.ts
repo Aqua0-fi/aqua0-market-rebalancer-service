@@ -65,6 +65,8 @@ const responseSchema = z.object({
     .max(2),
 });
 export interface SizingRequest {
+  executionPriority?: boolean;
+  signal?: AbortSignal | undefined;
   chain: ChainConfig;
   pool: Pool;
   market: Market;
