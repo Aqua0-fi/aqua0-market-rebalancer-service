@@ -4,6 +4,11 @@ export const poolTuple =
 export const legTuple = `(uint8 venue,address target,address tokenIn,address tokenOut,uint256 amountIn,uint256 minOut,${poolTuple} pool,bytes hookData)`;
 export const executorAbi = parseAbi([
   `function execute((bytes32 id,uint256 deadline,uint256 validUntilBlock,uint256 minProfit,${legTuple} first,${legTuple} second) trade) returns (uint256 profit)`,
+  "function supportsAquaSwapVM() pure returns (bool)",
+  "function swapVMRouters(address) view returns (address aqua,bytes32 codeHash,uint8 slices,bool allowed)",
+  "function swapVMStrategyKey(address,address,bytes32) pure returns (bytes32)",
+  "function swapVMStrategies(bytes32) view returns (address token0,address token1,uint256 classId,bool allowed)",
+  "event SwapVMLegExecuted(address indexed router,address indexed maker,bytes32 indexed strategyId,bytes32 orderHash,uint256 classId,address tokenIn,address tokenOut,uint256 amountIn,uint256 amountOut)",
   "function extendedV4Encoding() view returns (bool)",
   "function maxGasPrice() view returns (uint256)",
   "function executionBlockNumber() view returns (uint256)",

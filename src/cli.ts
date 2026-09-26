@@ -1,11 +1,25 @@
-import { createServer } from "node:http";
+import { loadRuntimeSecrets } from "./runtime-secrets.js";
+import { readFileSync, statSync } from "node:fs";
+import type { Server } from "node:http";
+import { HistoryStore } from "./history.js";
+import { SwapVMMarketCatalog } from "./swapvm-catalog.js";
+import { MarketCatalog } from "./market-catalog.js";
+import { createReportServer } from "./reporting.js";
 import { parseArgs } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import { loadChains, loadSettings } from "./config.js";
 import { AquaClient } from "./aqua.js";
 import { Runner, log, safeError } from "./runner.js";
 import { Journal, acquireLock } from "./state.js";
-import { clientFor, verifyChain, discover } from "./venues.js";
+import {
+  clientFor,
+  verifyChain,
+  discover,
+  type ExternalPool,
+} from "./venues.js";
+import { registryBlockers } from "./registry.js";
+loadRuntimeSecrets(process.env.REBALANCER_RUNTIME_SECRETS_FILE);
+
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
@@ -23,23 +37,77 @@ if (command === "doctor") {
   );
   if (selected.length === 0) throw new Error("Unknown chain selection");
   for (const chain of selected) {
+    const blockers = registryBlockers(chain);
+    if (blockers.length > 0) {
+      failures++;
+      log("chain_readiness", {
+        chainId: chain.chainId,
+        name: chain.name,
+        status: "blocked",
+        deploymentVerified: false,
+        blockers,
+        note: "Registered does not mean provisioned, funded or approved for execution",
+      });
+      continue;
+    }
+    let deploymentVerified = false;
+    const markets: {
+      poolId: string;
+      externalPools: ExternalPool[];
+      error?: string;
+    }[] = [];
     try {
       const client = clientFor(chain);
       await verifyChain(client, chain);
+      deploymentVerified = true;
       const block = await client.getBlock();
-      for (const pool of chain.pools)
-        log("chain_verified", {
-          chainId: chain.chainId,
-          block: block.number,
-          blockHash: block.hash,
-          poolId: pool.poolId,
-          externalPools: await discover(client, chain, pool, block.number),
-        });
+      for (const pool of chain.pools) {
+        try {
+          markets.push({
+            poolId: pool.poolId,
+            externalPools: await discover(client, chain, pool, block.number),
+          });
+        } catch (error) {
+          markets.push({
+            poolId: pool.poolId,
+            externalPools: [],
+            error: safeError(error),
+          });
+        }
+      }
+      const partial = markets.some((market) => market.error !== undefined);
+      const hasLiquidity = markets.some(
+        (market) => market.externalPools.length > 0,
+      );
+      if (partial || !hasLiquidity) failures++;
+      log("chain_readiness", {
+        chainId: chain.chainId,
+        name: chain.name,
+        status: partial
+          ? "partial"
+          : hasLiquidity
+            ? "market_discovered"
+            : "no_liquidity",
+        deploymentVerified,
+        block: block.number,
+        blockHash: block.hash,
+        markets,
+        blockers: partial
+          ? ["Some market discovery reads failed"]
+          : hasLiquidity
+            ? []
+            : ["No liquid supported external pool found"],
+        note: "Discovery does not verify executor funding, backend authorization or simulator parity",
+      });
     } catch (error) {
       failures++;
-      log("chain_unavailable", {
+      log("chain_readiness", {
         chainId: chain.chainId,
-        error: safeError(error),
+        name: chain.name,
+        status: "unavailable",
+        deploymentVerified,
+        markets,
+        blockers: [safeError(error)],
       });
     }
   }
@@ -48,49 +116,107 @@ if (command === "doctor") {
   if (command !== "scan" && command !== "run")
     throw new Error("Use doctor, scan, or run");
   const settings = loadSettings(values.config);
-  const headers: Record<string, string> = {};
-  if (process.env.AQUA0_API_KEY)
-    headers["X-API-Key"] = process.env.AQUA0_API_KEY;
+  const headers: Record<string, string> = {
+    "X-Network-Mode": settings.networkMode,
+  };
+  const readKey = process.env.AQUA0_READ_API_KEY ?? process.env.AQUA0_API_KEY;
+  if (readKey) headers["X-API-Key"] = readKey;
   if (process.env.AQUA0_CALLER_TOKEN)
     headers["X-Caller-Token"] = process.env.AQUA0_CALLER_TOKEN;
   const release = acquireLock("runtime/worker.lock");
-  const runner = new Runner(
-    chains,
-    settings,
-    new AquaClient(settings.apiUrl, headers),
-    new Journal("runtime/journal.json"),
-  );
+  let history: HistoryStore | undefined;
+  let catalog: MarketCatalog | undefined;
+  let swapVMCatalog: SwapVMMarketCatalog | undefined;
+  let server: Server | undefined;
   let stopping = false;
-  process.on("SIGINT", () => {
+  const stop = () => {
     stopping = true;
-  });
-  process.on("SIGTERM", () => {
-    stopping = true;
-  });
-  const server =
-    command === "run"
-      ? createServer((req, res) => {
-          if (req.url === "/health") {
-            res.statusCode =
-              Date.now() - runner.metrics.lastSuccess <
-              Math.max(120000, settings.pollMs * 4)
-                ? 200
-                : 503;
-            res.end(JSON.stringify(runner.metrics));
-          } else {
-            res.statusCode = 404;
-            res.end();
-          }
-        }).listen(9091, "127.0.0.1")
-      : undefined;
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
   try {
+    history = new HistoryStore("runtime/history.sqlite");
+    if (settings.discovery.enabled)
+      catalog = new MarketCatalog(
+        "runtime/markets.sqlite",
+        settings.networkMode,
+        chains,
+        Date.now,
+        settings.discovery.maxAgeMs,
+      );
+    if (settings.discovery.enabled)
+      swapVMCatalog = new SwapVMMarketCatalog(
+        "runtime/aqua-markets.sqlite",
+        settings.networkMode,
+        chains,
+        Date.now,
+        settings.discovery.maxAgeMs,
+      );
+    const runner = new Runner(
+      chains,
+      settings,
+      new AquaClient(settings.apiUrl, headers),
+      new Journal("runtime/journal.json"),
+      history,
+      catalog,
+      swapVMCatalog,
+    );
+    if (command === "run") {
+      server = createReportServer({
+        network: settings.networkMode,
+        token: process.env.REBALANCER_REPORT_TOKEN,
+        controlToken: process.env.REBALANCER_CONTROL_TOKEN,
+        catalog,
+        swapVMCatalog,
+        hostHealth: () => {
+          const path = process.env.REBALANCER_HOST_HEALTH_FILE;
+          if (!path)
+            return {
+              available: false,
+              reason: "Host watchdog is not configured",
+            };
+          try {
+            if (statSync(path).size > 131072)
+              throw new Error("Oversized host-health report");
+            return JSON.parse(readFileSync(path, "utf8")) as unknown;
+          } catch {
+            return {
+              available: false,
+              reason: "Host watchdog report is unavailable",
+            };
+          }
+        },
+        history,
+        status: () => runner.reportingStatus(),
+        health: () => ({
+          healthy:
+            Date.now() - runner.metrics.lastHeartbeat <
+            Math.max(120000, settings.pollMs * 4),
+          metrics: runner.metrics,
+        }),
+      });
+      const port = Number(process.env.REBALANCER_REPORT_PORT ?? "9091");
+      if (!Number.isInteger(port) || port < 1 || port > 65535)
+        throw new Error("Invalid reporting port");
+      const host = process.env.REBALANCER_REPORT_HOST ?? "127.0.0.1";
+      await new Promise<void>((resolve, reject) => {
+        server!.once("error", reject);
+        server!.listen(port, host, resolve);
+      });
+    }
     do {
       await runner.scan();
       if (command === "scan" || stopping) break;
       await sleep(settings.pollMs);
     } while (!stopping);
   } finally {
-    server?.close();
+    if (server?.listening)
+      await new Promise<void>((resolve) => server!.close(() => resolve()));
+    history?.close();
+    catalog?.close();
+    swapVMCatalog?.close();
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
     release();
   }
 }

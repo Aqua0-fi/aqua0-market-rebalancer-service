@@ -19,6 +19,7 @@
     "format:check": "prettier --check src test scripts/*.ts config/*.json README.md AGENTS.md project-context/*.md && forge fmt --check contracts"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "3.1095.0",
     "@openzeppelin/contracts": "5.5.0",
     "@openzeppelin/contracts-upgradeable": "5.5.0",
     "@openzeppelin/uniswap-hooks": "1.2.0",
@@ -33,6 +34,6 @@
     "typescript": "5.9.3"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   }
 }

@@ -26,6 +26,13 @@ export const poolSchema = z.object({
   tickSpacing: z.number().int().positive(),
   hooks: address,
 });
+export const swapVMDeploymentSchema = z.object({
+  router: address,
+  aqua: address,
+  maker: address,
+  slices: z.union([z.literal(9), z.literal(10)]),
+});
+
 const venueSchema = z.object({
   name: z.string(),
   factory: address,
@@ -34,10 +41,17 @@ const venueSchema = z.object({
 });
 export const chainSchema = z.object({
   chainId: z.number().int().positive(),
-  feeModel: z.enum(["op-stack", "gas-limit"]),
+  feeModel: z.enum(["op-stack", "gas-limit", "unsupported"]),
+  executionReviewed: z.boolean().default(false),
+  nativeCurrency: z
+    .object({ symbol: z.string(), decimals: z.number().int().min(0).max(36) })
+    .optional(),
+  nativeEquivalent: z
+    .object({ token: address, decimals: z.number().int().min(0).max(36) })
+    .optional(),
   name: z.string(),
   rpcEnv: z.string(),
-  publicRpc: z.url(),
+  publicRpc: z.url().optional(),
   poolManager: address,
   universalRouter: address,
   permit2: address,
@@ -45,6 +59,7 @@ export const chainSchema = z.object({
   extendedV4Encoding: z.boolean(),
   pools: z.array(poolSchema),
   venues: z.array(venueSchema),
+  swapVM: swapVMDeploymentSchema.optional(),
 });
 export type ChainConfig = z.infer<typeof chainSchema>;
 export type Pool = z.infer<typeof poolSchema>;
@@ -54,13 +69,27 @@ const marketSchema = z.object({
   poolId: poolSchema.shape.poolId,
   classId: positive,
   baseToken: address,
-  amounts: z.array(positive).min(1).max(8),
+  amounts: z.array(positive).max(8).default([]),
   minNetProfit: positive,
   maxInput: positive,
 });
 export type Market = z.infer<typeof marketSchema>;
+const quoteFeeSchema = z
+  .object({
+    maxGasUnits: positive,
+    maxFeePerGas: positive,
+    l1FeeReserveWei: uint,
+    wrappedNative: address,
+    gasConversionFee: z.number().int().positive(),
+    gasCostBufferBps: z.number().int().min(10000).max(30000).default(13000),
+    // Opaque programs may inspect msg.sender. Configure the intended caller for observation.
+    caller: address.optional(),
+  })
+  .strict();
 export const settingsSchema = z.object({
+  quoteFees: z.record(z.string(), quoteFeeSchema).default({}),
   mode: z.enum(["observe", "execute"]).default("observe"),
+  networkMode: z.enum(["mainnet", "fork"]).default("mainnet"),
   apiUrl: z.url(),
   pollMs: z.number().int().min(1000).default(15000),
   slippageBps: z.number().int().min(0).max(100).default(10),
@@ -68,24 +97,63 @@ export const settingsSchema = z.object({
   maxBlockLag: z.number().int().min(0).max(20).default(8),
   confirmations: z.number().int().min(1).default(2),
   maxConsecutiveErrors: z.number().int().positive().default(5),
-  markets: z.array(marketSchema).min(1),
+  markets: z.array(marketSchema).default([]),
+  discovery: z
+    .object({
+      enabled: z.boolean().default(false),
+      intervalMs: z.number().int().min(30000).max(3600000).default(120000),
+      maxAgeMs: z.number().int().min(60000).max(3600000).default(600000),
+    })
+    .default({ enabled: false, intervalMs: 120000, maxAgeMs: 600000 }),
   execution: z
     .record(
       z.string(),
-      z.object({
-        executor: address,
-        operator: address,
-        privateKeyEnv: z.string(),
-        allowBroadcast: z.boolean().default(false),
-        maxGasUnits: positive,
-        maxFeePerGas: positive,
-        l1FeeReserveWei: uint,
-        maxDailyGasWei: positive,
-        // Conversion is priced through a real V3 quoter; it is not a floating point USD assumption.
-        wrappedNative: address,
-        gasConversionFee: z.number().int().positive(),
-        gasCostBufferBps: z.number().int().min(10000).max(30000).default(13000),
-      }),
+      z
+        .object({
+          executor: address,
+          operator: address,
+          privateKeyEnv: z.string().min(1).optional(),
+          kms: z
+            .object({
+              region: z.string().regex(/^[a-z0-9-]+$/),
+              keyId: z
+                .string()
+                .regex(
+                  /^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key\/(?:[a-f0-9-]{36}|mrk-[a-f0-9]{32})$/,
+                ),
+            })
+            .optional(),
+          allowBroadcast: z.boolean().default(false),
+          maxGasUnits: positive,
+          maxFeePerGas: positive,
+          l1FeeReserveWei: uint,
+          maxDailyGasWei: positive,
+          // Conversion is priced through a real V3 quoter; it is not a floating point USD assumption.
+          wrappedNative: address,
+          gasConversionFee: z.number().int().positive(),
+          gasCostBufferBps: z
+            .number()
+            .int()
+            .min(10000)
+            .max(30000)
+            .default(13000),
+        })
+        .superRefine((config, ctx) => {
+          if (Boolean(config.privateKeyEnv) === Boolean(config.kms))
+            ctx.addIssue({
+              code: "custom",
+              message:
+                "Choose exactly one signer: a dedicated KMS key or a local private-key variable",
+            });
+          if (
+            config.kms &&
+            config.kms.keyId.split(":")[3] !== config.kms.region
+          )
+            ctx.addIssue({
+              code: "custom",
+              message: "KMS key region does not match configuration",
+            });
+        }),
     )
     .default({}),
 });
@@ -102,6 +170,8 @@ export function loadChains(path = "config/chains.json"): ChainConfig[] {
 }
 export function loadSettings(path: string): Settings {
   const settings = settingsSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+  if (!settings.discovery.enabled && settings.markets.length === 0)
+    throw new Error("Configure markets or enable public V4 discovery");
   for (const m of settings.markets)
     if (m.amounts.some((a) => a > m.maxInput))
       throw new Error("Sample exceeds market maxInput");
@@ -111,7 +181,12 @@ export function same(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 export function rpcUrl(chain: ChainConfig): string {
-  return process.env[chain.rpcEnv] ?? chain.publicRpc;
+  const url = process.env[chain.rpcEnv] ?? chain.publicRpc;
+  if (!url) throw new Error(`RPC not configured: ${chain.rpcEnv}`);
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:")
+    throw new Error("RPC must use HTTP(S)");
+  return url;
 }
 export function findPool(chain: ChainConfig, market: Market): Pool {
   const pool = chain.pools.find((p) => same(p.poolId, market.poolId));

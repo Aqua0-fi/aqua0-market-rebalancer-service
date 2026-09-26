@@ -1,11 +1,12 @@
 import { randomBytes } from "node:crypto";
 import type { Address, Hex } from "viem";
+import type { SwapVMExecutionContext } from "./swapvm.js";
 import type { Pool } from "./config.js";
 export const haircut = (amount: bigint, bps: number): bigint =>
   (amount * BigInt(10000 - bps)) / 10000n;
 export const ceilDiv = (a: bigint, b: bigint): bigint => (a + b - 1n) / b;
 export type Leg = {
-  venue: 0 | 1;
+  venue: 0 | 1 | 2;
   target: Address;
   tokenIn: Address;
   tokenOut: Address;
@@ -28,6 +29,8 @@ export type Candidate = {
   netProfit: bigint;
   quotedAt: number;
   blockNumber: bigint;
+  quoteBlockHash?: Hex;
+  swapVM?: SwapVMExecutionContext;
   aquaFirst: boolean;
 };
 export async function findCandidates(params: {

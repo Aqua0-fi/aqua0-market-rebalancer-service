@@ -8,7 +8,7 @@ import {
 } from "../src/strategy.js";
 import { loadChains, findPool, settingsSchema, zero } from "../src/config.js";
 import { validateQuote } from "../src/aqua.js";
-const chain = loadChains()[0]!;
+const chain = loadChains().find((c) => c.chainId === 8453)!;
 const pool = chain.pools[0]!;
 const base = {
   base: pool.currency0,
@@ -101,13 +101,24 @@ test("quote clamps, incorrect amounts, and token mismatches fail closed", () => 
   q.quote.execution.wasClamped = true;
   assert.throws(() => validateQuote(q, pool.currency0, pool.currency1, 1000n));
 });
-test("registry contains seven unique supported chains and usable venues", () => {
+test("registry separates canonical chain presence from executable venue support", () => {
   const chains = loadChains();
-  assert.equal(chains.length, 7);
-  assert.equal(new Set(chains.map((c) => c.chainId)).size, 7);
+  assert.ok(chains.length > 0);
+  assert.equal(new Set(chains.map((c) => c.chainId)).size, chains.length);
   for (const c of chains) {
     assert.notEqual(c.aqua0Hook, zero);
-    assert(c.venues.every((v) => v.factory && v.quoter));
+    assert(c.venues.every((v) => v.factory !== zero && v.quoter !== zero));
+    if (c.executionReviewed) {
+      assert.ok(
+        c.venues.length > 0,
+        `${c.name}: reviewed execution needs an external venue`,
+      );
+      assert.ok(
+        c.pools.length > 0,
+        `${c.name}: reviewed execution needs a protocol pool`,
+      );
+      assert.notEqual(c.feeModel, "unsupported");
+    }
   }
 });
 test("market cannot substitute a different pool or base asset", () => {

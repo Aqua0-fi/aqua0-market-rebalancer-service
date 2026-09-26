@@ -53,7 +53,7 @@ export async function verifyChain(
 export async function discover(
   client: PublicClient,
   chain: ChainConfig,
-  pool: Pool,
+  pool: Pick<Pool, "currency0" | "currency1">,
   blockNumber: bigint,
 ): Promise<ExternalPool[]> {
   const found: ExternalPool[] = [];
