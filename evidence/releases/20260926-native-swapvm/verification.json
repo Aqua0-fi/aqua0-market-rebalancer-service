@@ -30,7 +30,7 @@
   "frontendProductionBuild": "passed",
   "changedFrontendSourceLint": "passed",
   "stagedSourceSecretScans": "passed for all three repos",
-  "rollout": "NOT deployed; explicit source transfer to AWS blocked by tool platform",
+  "rollout": "Backend deployed to staging; worker and frontend update remain pending because AWS source upload was blocked",
   "liveWorkerChanged": false,
   "marketApprovalsChanged": false,
   "liveTradingEnabled": false,
@@ -40,5 +40,14 @@
     "web-all.log": "c6007ff667ee07f62b7a5175943bf0a288528e568897c2a12316ce61e9e2a630",
     "web-build.log": "707659c69fcf3b0a2cb3dd598a7db0b01b2649c5a455efd0e17ff31ac627ad7b",
     "web-changed-lint.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "backendDeployment": {
+    "pullRequest": 593,
+    "stagingCommit": "35fc07ba424cc9611177919c04e72019fb93735e",
+    "railwayDeploymentId": "5232d63d-82fa-4862-b2f6-cfcad2f1fba9",
+    "status": "SUCCESS",
+    "publicHealthHttp": 200,
+    "unauthenticatedSwapVMDiscoveryHttp": 401,
+    "authenticatedDataProbe": "blocked by tool platform; not verified"
   }
 }

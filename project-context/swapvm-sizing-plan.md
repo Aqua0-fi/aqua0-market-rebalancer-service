@@ -55,12 +55,14 @@ part of this implementation. Preserve the running observer and unrelated staging
 ## Release candidate verification and rollout boundary
 
 The automatic-sizing and SwapVM update is committed on `feat/rebalancer-native-swapvm` in all
-three repositories. Backend staging PR593 and frontend staging PR604 are open; worker PR1 is a
-draft for versioned review, not authorization to change production/main. Exact evidence is under
+three repositories. Backend staging PR593 is merged and its deployment is successful. Frontend staging PR604 stays open;
+worker PR1 is a draft for versioned review, not authorization to change production/main. Exact evidence is under
 `evidence/releases/20260926-native-swapvm/verification.json`.
 
 The explicit AWS source-transfer request was blocked by the tool platform. Read-only SSH still
 confirmed the old observer running, but the new image was not built or activated. Do not describe
-this update as deployed. Keep frontend PR604 unmerged until the observer supports the new policy
+the worker/frontend update as deployed. The compatible backend is deployed independently, with HTTP 200
+health and HTTP 401 unauthenticated SwapVM discovery checks. An authenticated data probe was blocked,
+so successful payload retrieval is not claimed. Keep frontend PR604 unmerged until the observer supports the new policy
 shape, or existing approvals would fail against the older worker. No funds, market approvals,
 execution permissions, signing configuration or production deployments were changed.
