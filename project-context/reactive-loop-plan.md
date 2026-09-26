@@ -84,6 +84,22 @@ localhost consistently without changing the production auth/host gates.
 
 ## Remaining deployment boundary
 
-This branch is implementation and verification until an explicit rollout record says otherwise.
-The previous backend update is on staging; the older AWS observer and unmerged frontend update do not
-become this version by changing a branch. No live trading or funding was enabled by this work.
+This implementation is now deployed to the authorized staging applications and existing AWS
+observe-only service. The exact release record is `evidence/releases/reactive-loop/release.json`.
+Backend PR597 merged as `cd825654ffd1b97703c456d39584fbe28a13de5d`; the final frontend includes PR605 and the
+presentation-only pagination follow-up PR606, merged as `aaf1e2be680883efb9f8b93c2e3167a910406865`.
+The worker runs image `sha256:fd3905313444dadae8228523e9b45db2a3e8f47b6b40d3c7b1e48cee48f53d26` from source `9e7970a641596d6b3dba0a4b0f711194e4af3c80`.
+
+The protected live page was verified on desktop and mobile: HTTP 200, block-driven status, available
+pause controls, a six-row initial SwapVM list, no visible errors and no horizontal overflow. The
+verifier clicked no live operating or pair-permission controls. Actual local synthetic-data tests
+separately exercised authenticated pause/resume saves, version conflicts and stale-refresh races.
+
+The bot remains watch-only with zero configured markets and zero execution-enabled chains at the
+verification time. The cutover preserved settings, credentials, pair permissions and transaction
+history and backed up runtime data before changing only the image pin. No funded executor, new pair
+approval or live trading activation was performed. Runtime controls do not supply those permissions.
+
+All backend CI checks passed. Local backend type/error baselines and inherited batch failures remain
+reported separately. The full frontend suite passed 6,195 tests with 50 skipped; its CI still has
+inherited global lint failures outside these changes, so full frontend CI is not claimed green.
