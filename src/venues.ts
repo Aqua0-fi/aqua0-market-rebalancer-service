@@ -1,3 +1,4 @@
+import { forEachConcurrent } from "./opportunity-queue.js";
 import {
   createPublicClient,
   http,
@@ -55,10 +56,13 @@ export async function discover(
   chain: ChainConfig,
   pool: Pick<Pool, "currency0" | "currency1">,
   blockNumber: bigint,
+  requireActiveLiquidity = true,
 ): Promise<ExternalPool[]> {
   const found: ExternalPool[] = [];
-  for (const venue of chain.venues)
-    for (const fee of venue.fees) {
+  await forEachConcurrent(
+    chain.venues.flatMap((venue) => venue.fees.map((fee) => ({ venue, fee }))),
+    4,
+    async ({ venue, fee }) => {
       const address = await client.readContract({
         address: venue.factory,
         abi: factoryAbi,
@@ -66,7 +70,7 @@ export async function discover(
         args: [pool.currency0, pool.currency1, fee],
         blockNumber,
       });
-      if (address === zeroAddress) continue;
+      if (address === zeroAddress) return;
       const [t0, t1, actualFee, liquidity] = await Promise.all([
         client.readContract({
           address,
@@ -99,9 +103,46 @@ export async function discover(
         actualFee !== fee
       )
         throw new Error("External pool binding mismatch");
-      if (liquidity > 0n) found.push({ address, fee, venue });
-    }
+      if (!requireActiveLiquidity || liquidity > 0n)
+        found.push({ address, fee, venue });
+    },
+  );
   return found;
+}
+// Cached discovery is only a list of candidate addresses, never cached depth or execution permission.
+// The backend revalidates the factory and reads current pool state before pricing every candidate.
+const venueHints = new WeakMap<
+  PublicClient,
+  Map<string, { at: number; block: bigint; value: Promise<ExternalPool[]> }>
+>();
+export async function discoverCached(
+  client: PublicClient,
+  chain: ChainConfig,
+  pair: Pick<Pool, "currency0" | "currency1">,
+  block: bigint,
+) {
+  let cache = venueHints.get(client);
+  if (!cache) {
+    cache = new Map();
+    venueHints.set(client, cache);
+  }
+  const key = JSON.stringify([
+    chain.chainId,
+    pair.currency0.toLowerCase(),
+    pair.currency1.toLowerCase(),
+    chain.venues,
+  ]);
+  const hit = cache.get(key);
+  if (hit && block >= hit.block && Date.now() - hit.at < 30000)
+    return hit.value;
+  const value = discover(client, chain, pair, block, false).catch((error) => {
+    cache!.delete(key);
+    throw error;
+  });
+  cache.delete(key);
+  cache.set(key, { at: Date.now(), block, value });
+  while (cache.size > 128) cache.delete(cache.keys().next().value!);
+  return value;
 }
 export async function quoteV3(
   client: PublicClient,

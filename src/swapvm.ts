@@ -174,6 +174,8 @@ const optimizedSchema = z.object({
     .max(2),
 });
 export interface SwapVMSizingRequest {
+  executionPriority?: boolean;
+  signal?: AbortSignal | undefined;
   chain: ChainConfig;
   market: SwapVMMarket;
   policy: MarketPolicy;

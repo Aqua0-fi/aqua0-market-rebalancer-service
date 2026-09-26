@@ -16,7 +16,8 @@
     "check": "npm run typecheck && npm test && npm run contracts:test",
     "test:integration": "node --import tsx --test test/execution.integration.ts",
     "format": "prettier --write src test scripts/*.ts config/*.json README.md AGENTS.md project-context/*.md && forge fmt contracts",
-    "format:check": "prettier --check src test scripts/*.ts config/*.json README.md AGENTS.md project-context/*.md && forge fmt --check contracts"
+    "format:check": "prettier --check src test scripts/*.ts config/*.json README.md AGENTS.md project-context/*.md && forge fmt --check contracts",
+    "test:heads": "node --import tsx --test test/head-feed.integration.ts"
   },
   "dependencies": {
     "@aws-sdk/client-kms": "3.1095.0",

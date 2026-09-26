@@ -87,6 +87,18 @@ const quoteFeeSchema = z
   })
   .strict();
 export const settingsSchema = z.object({
+  scheduling: z
+    .object({
+      headerPollMs: z.number().int().min(100).max(10000).default(500),
+      websocketAuditMs: z.number().int().min(1000).max(60000).default(5000),
+      maxConcurrentChains: z.number().int().min(1).max(8).default(4),
+      maxScanMs: z.number().int().min(500).max(30000).default(8000),
+      maxScanBlockLag: z.number().int().min(0).max(20).default(8),
+      websocketEnv: z
+        .record(z.string(), z.string().regex(/^[A-Z][A-Z0-9_]*$/))
+        .default({}),
+    })
+    .prefault({}),
   quoteFees: z.record(z.string(), quoteFeeSchema).default({}),
   mode: z.enum(["observe", "execute"]).default("observe"),
   networkMode: z.enum(["mainnet", "fork"]).default("mainnet"),

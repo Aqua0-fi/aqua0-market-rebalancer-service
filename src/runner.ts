@@ -1,3 +1,9 @@
+import type { RuntimeControls } from "./runtime-controls.js";
+import {
+  ReadyOpportunityQueue,
+  forEachConcurrent,
+} from "./opportunity-queue.js";
+import { ObsoleteScan, type ScanTask } from "./head-scheduler.js";
 import { registryBlockers } from "./registry.js";
 import { nativeCostForQuote } from "./fees.js";
 import { erc20Abi, type Address, type PublicClient } from "viem";
@@ -5,18 +11,13 @@ import { executorAbi } from "./abi.js";
 import { AquaClient } from "./aqua.js";
 import {
   clientFor,
-  discover,
+  discoverCached,
   quoteV3,
   verifyChain,
   type ExternalPool,
 } from "./venues.js";
 import { findPool, same, type ChainConfig, type Settings } from "./config.js";
-import {
-  findCandidates,
-  ceilDiv,
-  assertFresh,
-  type Candidate,
-} from "./strategy.js";
+import { ceilDiv, assertFresh, type Candidate } from "./strategy.js";
 import { reconcile, submit } from "./execution.js";
 import { Journal } from "./state.js";
 import type { HistoryStore } from "./history.js";
@@ -27,7 +28,6 @@ import {
   refreshSwapVMChoice,
   type SwapVMChoice,
 } from "./swapvm-search.js";
-import { refreshPublicMarkets } from "./discovery.js";
 export const json = (value: unknown): string =>
   JSON.stringify(value, (_, v: unknown) =>
     typeof v === "bigint" ? v.toString() : v,
@@ -48,6 +48,27 @@ export function safeError(error: unknown): string {
     .replace(/0x[0-9a-fA-F]{64}/g, "[redacted]")
     .slice(0, 220);
 }
+type ReadyChoice =
+  | {
+      kind: "v4";
+      startToken: Address;
+      candidate: Candidate;
+      market: Settings["markets"][number];
+      pool: ReturnType<typeof findPool>;
+      external: ExternalPool;
+    }
+  | SwapVMChoice;
+const compareReady = (a: ReadyChoice, b: ReadyChoice) => {
+  if (same(a.startToken, b.startToken))
+    return a.candidate.netProfit > b.candidate.netProfit
+      ? -1
+      : a.candidate.netProfit < b.candidate.netProfit
+        ? 1
+        : 0;
+  const left = a.candidate.netProfit * b.candidate.trade.first.amountIn,
+    right = b.candidate.netProfit * a.candidate.trade.first.amountIn;
+  return left > right ? -1 : left < right ? 1 : 0;
+};
 export class Runner {
   private clients = new Map<number, PublicClient>();
   private verified = new Set<number>();
@@ -64,7 +85,131 @@ export class Runner {
   private errors = new Map<number, number>();
   private lastScans = new Map<number, { at: string; error: string | null }>();
   private readonly startedAt = new Date().toISOString();
-  private lastDiscoveryAt = 0;
+  private retryAt = new Map<number, number>();
+  private activity: {
+    id: number;
+    at: string;
+    chainId: number;
+    event: string;
+    venue: string | null;
+    reason: string | null;
+    amount: string | null;
+  }[] = [];
+  private activitySequence = 0;
+  private stages = new Map<number, { stage: string; since: string }>();
+  private event(event: string, data: Record<string, unknown> = {}) {
+    log(event, data);
+    if (typeof data.chainId !== "number") return;
+    const stage: Record<string, string> = {
+      scan_started: "Checking prices",
+      opportunity_ready: "Opportunity found",
+      opportunity: "Rechecking selected trade",
+      signing: "Signing transaction",
+      simulating: "Simulating both trades",
+      broadcasting: "Sending transaction",
+      submitted: "Waiting for receipt",
+      pending_transaction: "Waiting for receipt",
+      operator_paused: "Paused by operator",
+      chain_error: "Needs attention",
+      obsolete_scan_discarded: "Refreshing changed state",
+      scan_complete: "Waiting for a new block",
+      jit_authorization: "Checking shared liquidity and permission",
+    };
+    const label =
+      event === "scan_complete" && data.submitted
+        ? "Waiting for receipt"
+        : stage[event];
+    if (label)
+      this.stages.set(data.chainId, {
+        stage: label,
+        since: new Date().toISOString(),
+      });
+    const noteworthy = new Set([
+      "opportunity_ready",
+      "opportunity",
+      "submitted",
+      "operator_paused",
+      "chain_error",
+      "obsolete_scan_discarded",
+      "sizing_rejected",
+      "swapvm_sizing_rejected",
+      "opportunity_disappeared",
+    ]);
+    if (!noteworthy.has(event)) return;
+    const previous = this.activity[this.activity.length - 1];
+    if (
+      previous?.chainId === data.chainId &&
+      previous.event === event &&
+      Date.now() - Date.parse(previous.at) < 3000
+    )
+      return;
+    this.activity.push({
+      id: ++this.activitySequence,
+      at: new Date().toISOString(),
+      chainId: data.chainId,
+      event,
+      venue: typeof data.venue === "string" ? data.venue.slice(0, 40) : null,
+      reason:
+        typeof data.error === "string"
+          ? safeError(new Error(data.error))
+          : typeof data.reason === "string"
+            ? safeError(new Error(data.reason))
+            : null,
+      amount: typeof data.amount === "bigint" ? data.amount.toString() : null,
+    });
+    if (this.activity.length > 60) this.activity.shift();
+  }
+
+  private busy = new Set<number>();
+  schedulingStatus: () => unknown = () => ({ mode: "one-shot" });
+  marketChanged: (chainId: number) => void = () => {};
+  client(chainId: number): PublicClient {
+    let client = this.clients.get(chainId);
+    if (!client) {
+      const chain = this.chains.find((c) => c.chainId === chainId);
+      if (!chain) throw new Error("Unknown chain");
+      client = clientFor(chain);
+      this.clients.set(chainId, client);
+    }
+    return client;
+  }
+  activeChainIds(): number[] {
+    return [
+      ...new Set([
+        ...this.markets().map((m) => m.chainId),
+        ...this.swapVMMarkets().map((m) => m.market.chainId),
+        ...Object.keys(this.settings.execution).map(Number),
+      ]),
+    ];
+  }
+  async discoverChain(chainId: number): Promise<void> {
+    if (!this.settings.discovery.enabled) return;
+    const chain = this.chains.find((c) => c.chainId === chainId);
+    if (!chain) return;
+    await Promise.all([
+      (async () => {
+        try {
+          this.catalog!.recordListing(chain, await this.aqua.listPools(chain));
+        } catch (e) {
+          this.catalog!.recordFailure(chainId, safeError(e));
+        }
+      })(),
+      (async () => {
+        if (!this.swapVMCatalog) return;
+        try {
+          this.swapVMCatalog.recordListing(
+            chain,
+            await this.aqua.listSwapVM(chain),
+          );
+        } catch {
+          this.swapVMCatalog.recordFailure(chainId);
+        }
+      })(),
+    ]);
+    this.metrics.lastHeartbeat = Date.now();
+    this.marketChanged(chainId);
+  }
+
   constructor(
     private readonly chains: ChainConfig[],
     private readonly settings: Settings,
@@ -73,6 +218,7 @@ export class Runner {
     private readonly history?: HistoryStore,
     private readonly catalog?: MarketCatalog,
     private readonly swapVMCatalog?: SwapVMMarketCatalog,
+    private readonly controls?: RuntimeControls,
   ) {
     if (settings.discovery.enabled && !catalog)
       throw new Error("Discovery needs a persistent market catalog");
@@ -113,6 +259,10 @@ export class Runner {
       generatedAt: new Date().toISOString(),
       startedAt: this.startedAt,
       metrics: { ...this.metrics },
+      scheduling: this.schedulingStatus(),
+      operatingControl: this.controls?.read() ?? null,
+      recentActivity: [...this.activity].reverse(),
+      searchQueue: this.aqua.searchStatus(),
       chains: this.chains.map((chain) => ({
         chainId: chain.chainId,
         name: chain.name,
@@ -121,6 +271,10 @@ export class Runner {
           this.markets().filter((m) => m.chainId === chain.chainId).length +
           this.swapVMMarkets().filter((m) => m.market.chainId === chain.chainId)
             .length,
+        quoteConfigured: !!(
+          this.settings.execution[String(chain.chainId)] ??
+          this.settings.quoteFees[String(chain.chainId)]
+        ),
         registryBlockers: registryBlockers(chain),
         deploymentVerified: this.verified.has(chain.chainId),
         executionEnabled:
@@ -130,6 +284,8 @@ export class Runner {
           (this.errors.get(chain.chainId) ?? 0) >=
           this.settings.maxConsecutiveErrors,
         lastScan: this.lastScans.get(chain.chainId) ?? null,
+        activity: this.stages.get(chain.chainId) ?? null,
+        retryAt: this.retryAt.get(chain.chainId) ?? null,
         pools: chain.pools.map((pool) => ({
           poolId: pool.poolId,
           currency0: pool.currency0,
@@ -139,86 +295,67 @@ export class Runner {
     };
   }
   async scan(): Promise<void> {
+    if (this.settings.discovery.enabled)
+      await Promise.all(this.chains.map((c) => this.discoverChain(c.chainId)));
+    await Promise.all(this.activeChainIds().map((id) => this.scanLatest(id)));
+  }
+  async scanLatest(chainId: number, task?: ScanTask): Promise<void | false> {
+    if (this.busy.has(chainId))
+      throw new Error(
+        "A scan already owns this chain; do not overlap its nonce lane",
+      );
+    if (Date.now() < (this.retryAt.get(chainId) ?? 0)) return false;
+    this.busy.add(chainId);
     const started = Date.now();
     this.metrics.scanStartedAt = started;
-    this.metrics.lastHeartbeat = started;
-    if (
-      this.settings.discovery.enabled &&
-      started - this.lastDiscoveryAt >= this.settings.discovery.intervalMs
-    ) {
-      this.lastDiscoveryAt = started;
-      const result = await refreshPublicMarkets(
-        this.chains,
-        this.aqua,
-        this.catalog!,
+    this.event("scan_started", { chainId });
+    try {
+      task?.assertCurrent();
+      await this.scanChain(chainId, task);
+      this.errors.set(chainId, 0);
+      this.retryAt.delete(chainId);
+      this.metrics.lastSuccess = Date.now();
+      this.lastScans.set(chainId, {
+        at: new Date().toISOString(),
+        error: null,
+      });
+    } catch (error) {
+      if (error instanceof ObsoleteScan || task?.signal.aborted) {
+        this.event("obsolete_scan_discarded", { chainId });
+        throw new ObsoleteScan();
+      }
+      const count = (this.errors.get(chainId) ?? 0) + 1;
+      this.errors.set(chainId, count);
+      this.metrics.errors++;
+      this.retryAt.set(
+        chainId,
+        Date.now() + Math.min(60000, 250 * 2 ** Math.min(count, 8)),
       );
+      this.lastScans.set(chainId, {
+        at: new Date().toISOString(),
+        error: safeError(error),
+      });
+      this.event("chain_error", { chainId, error: safeError(error) });
+    } finally {
+      this.busy.delete(chainId);
+      this.metrics.scans++;
       this.metrics.lastHeartbeat = Date.now();
-      if (result.succeeded > 0) this.metrics.lastSuccess = Date.now();
-      log("public_v4_discovery", result);
-      if (this.swapVMCatalog) {
-        for (const chain of this.chains) {
-          try {
-            this.swapVMCatalog.recordListing(
-              chain,
-              await this.aqua.listSwapVM(chain),
-            );
-          } catch {
-            this.swapVMCatalog.recordFailure(chain.chainId);
-          }
-          this.metrics.lastHeartbeat = Date.now();
-        }
-      }
+      this.metrics.scanDurationMs = Date.now() - started;
     }
-    for (const chainId of new Set([
-      ...this.markets().map((m) => m.chainId),
-      ...this.swapVMMarkets().map((m) => m.market.chainId),
-    ])) {
-      if (
-        (this.errors.get(chainId) ?? 0) >= this.settings.maxConsecutiveErrors
-      ) {
-        const last = this.lastScans.get(chainId);
-        if (
-          this.settings.mode !== "observe" ||
-          (last && Date.now() - Date.parse(last.at) < 120000)
-        ) {
-          log("circuit_open", { chainId });
-          continue;
-        }
-        this.errors.set(chainId, 0);
-      }
-      try {
-        await this.scanChain(chainId);
-        this.errors.set(chainId, 0);
-        this.metrics.lastSuccess = Date.now();
-        this.lastScans.set(chainId, {
-          at: new Date().toISOString(),
-          error: null,
-        });
-      } catch (error) {
-        this.metrics.errors++;
-        this.errors.set(chainId, (this.errors.get(chainId) ?? 0) + 1);
-        log("chain_error", { chainId, error: safeError(error) });
-        this.lastScans.set(chainId, {
-          at: new Date().toISOString(),
-          error: safeError(error),
-        });
-      }
-    }
-    this.metrics.scans++;
-    this.metrics.lastHeartbeat = Date.now();
-    this.metrics.scanDurationMs = this.metrics.lastHeartbeat - started;
   }
-  private async scanChain(chainId: number): Promise<void> {
+  private async scanChain(chainId: number, task?: ScanTask): Promise<void> {
+    const check = () => {
+      task?.assertCurrent();
+      if (this.controls?.paused(chainId))
+        throw new ObsoleteScan("New checks and trades are paused");
+    };
+    task?.assertCurrent();
     const configured = this.chains.find((c) => c.chainId === chainId);
     if (!configured) throw new Error("Unknown configured chain");
     const chain = this.settings.discovery.enabled
       ? { ...configured, pools: this.catalog!.activePools(chainId) }
       : configured;
-    let client = this.clients.get(chainId);
-    if (!client) {
-      client = clientFor(chain);
-      this.clients.set(chainId, client);
-    }
+    const client = this.client(chainId);
     if (!this.verified.has(chainId)) {
       await verifyChain(client, chain);
       this.verified.add(chainId);
@@ -234,7 +371,7 @@ export class Runner {
         this.history,
       ))
     ) {
-      log("pending_transaction", { chainId });
+      this.event("pending_transaction", { chainId });
       return;
     }
     if (
@@ -244,6 +381,16 @@ export class Runner {
     ) {
       throw new Error("Receipt failure circuit is open");
     }
+    if (this.controls?.paused(chainId)) {
+      this.event("operator_paused", { chainId });
+      return;
+    }
+    check();
+    if (
+      !this.markets().some((m) => m.chainId === chainId) &&
+      !this.swapVMMarkets().some((m) => m.market.chainId === chainId)
+    )
+      return;
     const config = execution ?? this.settings.quoteFees[String(chainId)];
     if (!config)
       throw new Error(
@@ -257,135 +404,189 @@ export class Runner {
       if (blockers.length > 0)
         throw new Error(`Chain not ready: ${blockers.join("; ")}`);
     }
-    const choices: (
-      | {
-          kind: "v4";
-          startToken: Address;
-          candidate: Candidate;
-          market: Settings["markets"][number];
-          pool: ReturnType<typeof findPool>;
-          external: ExternalPool;
-        }
-      | SwapVMChoice
-    )[] = [];
+    const choices: ReadyChoice[] = [];
+    const queuedAt = new WeakMap<ReadyChoice, string>();
+    const searchStop = new AbortController();
+    const searchSignal = task
+      ? AbortSignal.any([task.signal, searchStop.signal])
+      : searchStop.signal;
+    const executionQueue =
+      this.settings.mode === "execute"
+        ? new ReadyOpportunityQueue<ReadyChoice>(
+            compareReady,
+            (choice) => this.executeChoice(chain, client, choice, task),
+            () =>
+              searchStop.abort(
+                new Error("Execution lane has selected a trade"),
+              ),
+            (choice) => !task || queuedAt.get(choice) === task.queueRevision(),
+          )
+        : undefined;
+    const offer = (choice: ReadyChoice) => {
+      if (searchSignal.aborted) return;
+      if (task) {
+        if (!choice.candidate.quoteBlockHash) return;
+        task.adoptQuote(
+          choice.candidate.blockNumber,
+          choice.candidate.quoteBlockHash,
+        );
+        queuedAt.set(choice, task.queueRevision());
+      }
+      check();
+      choices.push(choice);
+      executionQueue?.offer(choice);
+      this.event("opportunity_ready", {
+        chainId,
+        venue: choice.kind,
+        baseToken: choice.startToken,
+        amount: choice.candidate.trade.first.amountIn,
+        conservativeNetProfit: choice.candidate.netProfit,
+        selection: "best-currently-ready; does not wait for slower venues",
+      });
+    };
     let quoteFailures = 0,
       completedQuotes = 0;
-    for (const market of this.markets().filter((m) => m.chainId === chainId)) {
-      const pool = findPool(chain, market);
-      const head = await client.getBlock();
-      let inputCap =
-        market.maxInput < (1n << 128n) - 1n
-          ? market.maxInput
-          : (1n << 128n) - 1n;
-      if (this.settings.mode === "execute") {
-        const [inventory, limits] = await Promise.all([
-          client.readContract({
-            address: market.baseToken,
-            abi: erc20Abi,
-            functionName: "balanceOf",
-            args: [execution!.executor],
-            blockNumber: head.number,
-          }),
-          client.readContract({
-            address: execution!.executor,
-            abi: executorAbi,
-            functionName: "limits",
-            args: [market.baseToken],
-            blockNumber: head.number,
-          }),
-        ]);
-        if (inventory < inputCap) inputCap = inventory;
-        if (limits[0] < inputCap) inputCap = limits[0];
-      }
-      if (inputCap === 0n) {
-        log("no_operating_inventory", { chainId, poolId: pool.poolId });
-        continue;
-      }
-      const venues = await discover(client, chain, pool, head.number);
-      const nativeCost =
-        config.maxGasUnits * config.maxFeePerGas + config.l1FeeReserveWei;
-      for (const external of venues) {
-        const gasAsset = nativeCostForQuote(
-          chain,
-          config.wrappedNative,
-          nativeCost,
-        );
-        const costInBase = same(gasAsset.token, market.baseToken)
-          ? gasAsset.amount
-          : await quoteV3(
-              client,
-              external.venue.quoter,
-              config.gasConversionFee,
-              gasAsset.token,
-              market.baseToken,
-              gasAsset.amount,
-              head.number,
-            );
-        const gasCost = ceilDiv(
-          costInBase * BigInt(config.gasCostBufferBps),
-          10000n,
-        );
-        try {
-          this.assertMarketApproval(market);
-          const optimized = await this.aqua.optimize({
-            chain,
-            pool,
-            market,
-            external,
-            network: this.settings.networkMode,
-            maxInput: inputCap,
-            gasBudget: gasCost,
-            slippageBps: this.settings.slippageBps,
-          });
-          completedQuotes += optimized.searches.reduce(
-            (sum, item) => sum + item.curveEvaluations,
-            0,
-          );
-          log("automatic_sizing", {
-            chainId,
-            poolId: pool.poolId,
-            externalPool: external.address,
-            inputCap,
-            blockNumber: optimized.blockNumber,
-            searches: optimized.searches,
-            excluded: optimized.excluded.map((item) => ({
-              aquaFirst: item.aquaFirst,
-              reason: safeError(new Error(item.reason)),
-            })),
-          });
-          for (const candidate of optimized.candidates) {
-            assertFresh(
-              candidate,
-              await client.getBlockNumber(),
-              Date.now(),
-              this.settings.maxQuoteAgeMs,
-              this.settings.maxBlockLag,
-            );
-            if (
-              (await client.getBlock({ blockNumber: candidate.blockNumber }))
-                .hash !== candidate.quoteBlockHash
-            )
-              throw new Error("Sizing block reorganized");
-            choices.push({
-              kind: "v4",
-              startToken: market.baseToken,
-              candidate,
-              market,
-              pool,
-              external,
-            });
+    const collectV4 = () =>
+      forEachConcurrent(
+        v4Markets,
+        2,
+        async (market) => {
+          if (searchSignal.aborted) return;
+          check();
+          const pool = findPool(chain, market);
+          const head = await client.getBlock();
+          let inputCap =
+            market.maxInput < (1n << 128n) - 1n
+              ? market.maxInput
+              : (1n << 128n) - 1n;
+          if (this.settings.mode === "execute") {
+            const [inventory, limits] = await Promise.all([
+              client.readContract({
+                address: market.baseToken,
+                abi: erc20Abi,
+                functionName: "balanceOf",
+                args: [execution!.executor],
+                blockNumber: head.number,
+              }),
+              client.readContract({
+                address: execution!.executor,
+                abi: executorAbi,
+                functionName: "limits",
+                args: [market.baseToken],
+                blockNumber: head.number,
+              }),
+            ]);
+            if (inventory < inputCap) inputCap = inventory;
+            if (limits[0] < inputCap) inputCap = limits[0];
           }
-        } catch (error) {
-          quoteFailures++;
-          log("sizing_rejected", {
-            chainId,
-            poolId: pool.poolId,
-            venue: external.venue.name,
-            error: safeError(error),
-          });
-        }
-      }
-    }
+          if (inputCap === 0n) {
+            this.event("no_operating_inventory", {
+              chainId,
+              poolId: pool.poolId,
+            });
+            return;
+          }
+          const venues = await discoverCached(client, chain, pool, head.number);
+          const nativeCost =
+            config.maxGasUnits * config.maxFeePerGas + config.l1FeeReserveWei;
+          await forEachConcurrent(
+            venues,
+            2,
+            async (external) => {
+              if (searchSignal.aborted) return;
+              check();
+              const gasAsset = nativeCostForQuote(
+                chain,
+                config.wrappedNative,
+                nativeCost,
+              );
+              const costInBase = same(gasAsset.token, market.baseToken)
+                ? gasAsset.amount
+                : await quoteV3(
+                    client,
+                    external.venue.quoter,
+                    config.gasConversionFee,
+                    gasAsset.token,
+                    market.baseToken,
+                    gasAsset.amount,
+                    head.number,
+                  );
+              const gasCost = ceilDiv(
+                costInBase * BigInt(config.gasCostBufferBps),
+                10000n,
+              );
+              try {
+                this.assertMarketApproval(market);
+                const optimized = await this.aqua.optimize({
+                  chain,
+                  pool,
+                  market,
+                  external,
+                  network: this.settings.networkMode,
+                  maxInput: inputCap,
+                  gasBudget: gasCost,
+                  slippageBps: this.settings.slippageBps,
+                  signal: searchSignal,
+                });
+                if (searchSignal.aborted) return;
+                check();
+                completedQuotes += optimized.searches.reduce(
+                  (sum, item) => sum + item.curveEvaluations,
+                  0,
+                );
+                this.event("automatic_sizing", {
+                  chainId,
+                  poolId: pool.poolId,
+                  externalPool: external.address,
+                  inputCap,
+                  blockNumber: optimized.blockNumber,
+                  searches: optimized.searches,
+                  excluded: optimized.excluded.map((item) => ({
+                    aquaFirst: item.aquaFirst,
+                    reason: safeError(new Error(item.reason)),
+                  })),
+                });
+                for (const candidate of optimized.candidates) {
+                  assertFresh(
+                    candidate,
+                    await client.getBlockNumber(),
+                    Date.now(),
+                    this.settings.maxQuoteAgeMs,
+                    this.settings.maxBlockLag,
+                  );
+                  if (
+                    (
+                      await client.getBlock({
+                        blockNumber: candidate.blockNumber,
+                      })
+                    ).hash !== candidate.quoteBlockHash
+                  )
+                    throw new Error("Sizing block reorganized");
+                  offer({
+                    kind: "v4",
+                    startToken: market.baseToken,
+                    candidate,
+                    market,
+                    pool,
+                    external,
+                  });
+                }
+              } catch (error) {
+                if (searchSignal.aborted) return;
+                quoteFailures++;
+                this.event("sizing_rejected", {
+                  chainId,
+                  poolId: pool.poolId,
+                  venue: external.venue.name,
+                  error: safeError(error),
+                });
+              }
+            },
+            searchSignal,
+          );
+        },
+        searchSignal,
+      );
     const vmContext = this.swapVMCatalog
       ? {
           client,
@@ -393,37 +594,68 @@ export class Runner {
           settings: this.settings,
           aqua: this.aqua,
           catalog: this.swapVMCatalog,
-          onEvent: log,
+          onEvent: (event: string, data: Record<string, unknown>) =>
+            this.event(event, data),
+          check,
+          signal: searchSignal,
+          onCandidate: offer,
         }
       : undefined;
-    if (vmContext) choices.push(...(await collectSwapVMChoices(vmContext)));
+    const reads = await Promise.allSettled([
+      collectV4(),
+      vmContext ? collectSwapVMChoices(vmContext) : Promise.resolve([]),
+    ]);
+    // Started reads are drained even if sending fails, so no late callback can launch a second account lane.
+    const accepted = await executionQueue?.settle();
     this.metrics.candidates += choices.length;
-    log("scan_complete", {
+    this.event("scan_complete", {
       chainId,
       candidates: choices.length,
       completedQuotes,
       quoteFailures,
       mode: this.settings.mode,
+      submitted: !!accepted,
     });
-    if (quoteFailures > 0 && choices.length === 0)
+    if (accepted) return;
+    check();
+    const error = reads.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (error) throw error.reason;
+    if (quoteFailures && choices.length === 0)
       throw new Error("Quote failures prevented a healthy scan");
-    // Within the SAME starting token choose absolute net profit, not return percentage.
-    // Across distinct unpriced assets only ROI is comparable; do not add incompatible raw units.
-    choices.sort((a, b) => {
-      if (same(a.startToken, b.startToken))
-        return a.candidate.netProfit > b.candidate.netProfit
-          ? -1
-          : a.candidate.netProfit < b.candidate.netProfit
-            ? 1
-            : 0;
-      const left = a.candidate.netProfit * b.candidate.trade.first.amountIn;
-      const right = b.candidate.netProfit * a.candidate.trade.first.amountIn;
-      return left > right ? -1 : left < right ? 1 : 0;
-    });
-    const choice = choices[0];
-    if (!choice) return;
+  }
+  private async executeChoice(
+    chain: ChainConfig,
+    client: PublicClient,
+    choice: ReadyChoice,
+    task?: ScanTask,
+  ): Promise<boolean> {
+    const chainId = chain.chainId,
+      check = () => {
+        task?.assertCurrent();
+        if (this.controls?.paused(chainId))
+          throw new ObsoleteScan("New checks and trades are paused");
+      };
+    const execution = this.settings.execution[String(chainId)];
+    if (!execution) throw new Error("No execution configuration");
+    const config = execution;
+    const vmContext = this.swapVMCatalog
+      ? {
+          client,
+          chain,
+          settings: this.settings,
+          aqua: this.aqua,
+          catalog: this.swapVMCatalog,
+          onEvent: (event: string, data: Record<string, unknown>) =>
+            this.event(event, data),
+          check,
+          signal: task?.signal,
+          bindSnapshot: task?.adoptQuote,
+        }
+      : undefined;
     let { candidate } = choice;
-    log("opportunity", {
+    this.event("opportunity", {
       chainId,
       baseToken: choice.startToken,
       venue: choice.kind,
@@ -431,15 +663,16 @@ export class Runner {
       conservativeNetProfit: candidate.netProfit,
       aquaFirst: candidate.aquaFirst,
     });
-    if (this.settings.mode === "observe") return;
+    check();
+    if (this.settings.mode === "observe") return false;
     if (!execution?.allowBroadcast)
       throw new Error("Broadcast disabled for chain");
     if (choice.kind === "aqua") {
       if (!vmContext) throw new Error("SwapVM catalog is not configured");
       const refreshed = await refreshSwapVMChoice(vmContext, choice);
       if (!refreshed) {
-        log("opportunity_disappeared", { chainId, venue: "aqua" });
-        return;
+        this.event("opportunity_disappeared", { chainId, venue: "aqua" });
+        return false;
       }
       const hash = await submit(
         client,
@@ -449,11 +682,16 @@ export class Runner {
         this.journal,
         this.history,
         undefined,
-        () => vmContext.catalog.assertApproved(choice.market, choice.policy),
+        (snapshot) => {
+          check();
+          if (snapshot) task?.bindSnapshot(snapshot.number, snapshot.hash);
+          vmContext.catalog.assertApproved(choice.market, choice.policy);
+        },
+        (stage) => this.event(stage, { chainId }),
       );
       this.metrics.submitted++;
-      log("submitted", { chainId, hash, venue: "aqua" });
-      return;
+      this.event("submitted", { chainId, hash, venue: "aqua" });
+      return true;
     }
     const { market, pool, external } = choice;
     // Discovery can take many blocks. Refresh the selected size and direction before reserving JIT backing.
@@ -479,37 +717,58 @@ export class Runner {
           gasAsset.amount,
           fresh.number,
         );
-    const refreshed = await findCandidates({
-      base: market.baseToken,
-      other,
+    const [balance, currentLimits] = await Promise.all([
+      client.readContract({
+        address: market.baseToken,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [execution.executor],
+        blockNumber: fresh.number,
+      }),
+      client.readContract({
+        address: execution.executor,
+        abi: executorAbi,
+        functionName: "limits",
+        args: [market.baseToken],
+        blockNumber: fresh.number,
+      }),
+    ]);
+    const inputCap = [
+      market.maxInput,
+      balance,
+      currentLimits[0],
+      (1n << 128n) - 1n,
+    ].reduce((a, b) => (a < b ? a : b));
+    if (inputCap <= 0n) return false;
+    // Shared backing or either pool may have changed. Re-optimize the route, not only the old size.
+    this.assertMarketApproval(market);
+    check();
+    const optimized = await this.aqua.optimize({
+      chain,
       pool,
-      router: chain.universalRouter,
-      external: external.address,
-      amounts: [candidate.trade.first.amountIn],
+      market,
+      external,
+      network: this.settings.networkMode,
+      maxInput: inputCap,
+      gasBudget: ceilDiv(costInBase * BigInt(config.gasCostBufferBps), 10000n),
       slippageBps: this.settings.slippageBps,
-      minNetProfit: market.minNetProfit,
-      gasCost: ceilDiv(costInBase * BigInt(config.gasCostBufferBps), 10000n),
-      blockNumber: fresh.number,
-      timestamp: fresh.timestamp,
-      quoteAqua: (input, amount) =>
-        this.aqua.quote(chain, pool, market, input, amount),
-      quoteExternal: (input, amount) =>
-        quoteV3(
-          client!,
-          external.venue.quoter,
-          external.fee,
-          input,
-          same(input, market.baseToken) ? other : market.baseToken,
-          amount,
-          fresh.number,
-        ),
+      signal: task?.signal,
+      executionPriority: true,
     });
-    const selected = refreshed.find((c) => c.aquaFirst === candidate.aquaFirst);
+    const selected = optimized.candidates[0];
     if (!selected) {
-      log("opportunity_disappeared", { chainId });
-      return;
+      this.event("opportunity_disappeared", { chainId });
+      return false;
     }
     candidate = selected;
+    if (candidate.quoteBlockHash) {
+      if (
+        (await client.getBlock({ blockNumber: candidate.blockNumber })).hash !==
+        candidate.quoteBlockHash
+      )
+        throw new ObsoleteScan("Refreshed pool state reorganized");
+      task?.adoptQuote(candidate.blockNumber, candidate.quoteBlockHash);
+    }
     assertFresh(
       candidate,
       await client.getBlockNumber(),
@@ -520,7 +779,9 @@ export class Runner {
     const aquaLeg = candidate.aquaFirst
       ? candidate.trade.first
       : candidate.trade.second;
+    check();
     this.assertMarketApproval(market);
+    this.event("jit_authorization", { chainId });
     const auth = await this.aqua.authorize(
       chain,
       pool,
@@ -528,6 +789,7 @@ export class Runner {
       aquaLeg.tokenIn,
       aquaLeg.amountIn,
     );
+    check();
     aquaLeg.hookData = auth.hookData;
     candidate.trade.deadline =
       auth.deadline < candidate.trade.deadline
@@ -541,9 +803,15 @@ export class Runner {
       this.journal,
       this.history,
       undefined,
-      () => this.assertMarketApproval(market),
+      (snapshot) => {
+        check();
+        if (snapshot) task?.bindSnapshot(snapshot.number, snapshot.hash);
+        this.assertMarketApproval(market);
+      },
+      (stage) => this.event(stage, { chainId }),
     );
     this.metrics.submitted++;
-    log("submitted", { chainId, hash });
+    this.event("submitted", { chainId, hash });
+    return true;
   }
 }

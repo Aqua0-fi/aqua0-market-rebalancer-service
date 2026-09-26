@@ -23,13 +23,15 @@ export async function submit(
   journal: Journal,
   history?: HistoryStore,
   kmsTransport?: KmsTransport,
-  beforeBroadcast?: () => void,
+  beforeBroadcast?: (simulation?: { number: bigint; hash: Hex }) => void,
+  onProgress?: (stage: string) => void,
 ): Promise<Hex> {
   const config = settings.execution[String(chain.chainId)];
   if (settings.mode !== "execute" || !config?.allowBroadcast)
     throw new Error("Broadcast disabled");
   if (!chain.executionReviewed || chain.feeModel === "unsupported")
     throw new Error("Chain execution capability is not reviewed");
+  beforeBroadcast?.();
   const account = await workerAccount(
     chain.chainId,
     config,
@@ -160,6 +162,7 @@ export async function submit(
       functionName: "executionBlockNumber",
       blockNumber: head.number,
     })) + 2n;
+  onProgress?.("simulating");
   // Simulate the entire atomic cycle, including the final balance-based profit assertion.
   await client.simulateContract({
     address: config.executor,
@@ -225,10 +228,32 @@ export async function submit(
   );
   if (candidate.trade.deadline <= signingHead.timestamp + 5n)
     throw new Error("Authorization near expiry before signing");
+  // If the chain moved during gas/nonce checks, verify the exact transaction again at the new
+  // state. This includes shared vault backing and both venues, not just the selected pool price.
+  if (signingHead.hash !== head.hash) {
+    await client.simulateContract({
+      address: config.executor,
+      abi: executorAbi,
+      functionName: "execute",
+      args: [candidate.trade],
+      account,
+      gasPrice,
+      gas,
+      blockNumber: signingHead.number,
+    });
+    if (
+      (await client.getBlock({ blockNumber: signingHead.number })).hash !==
+      signingHead.hash
+    )
+      throw new Error("Latest execution simulation reorganized");
+  }
+  const simulatedAt = { number: signingHead.number, hash: signingHead.hash };
   const wallet = createWalletClient({
     account,
     transport: http(rpcUrl(chain)),
   });
+  beforeBroadcast?.(simulatedAt);
+  onProgress?.("signing");
   const signed = await wallet.signTransaction({
     chain: null,
     chainId: chain.chainId,
@@ -239,7 +264,7 @@ export async function submit(
     gasPrice,
     nonce,
   });
-  beforeBroadcast?.();
+  beforeBroadcast?.(simulatedAt);
   const hash = keccak256(signed);
   const journalKey = `${chain.chainId}:${account.address.toLowerCase()}`;
   // Persist the deterministic hash BEFORE broadcast. An uncertain response cannot cause a second send.
@@ -253,6 +278,7 @@ export async function submit(
     config.maxDailyGasWei,
     history !== undefined,
   );
+  onProgress?.("broadcasting");
   await client.sendRawTransaction({ serializedTransaction: signed });
   history?.acknowledgeBroadcast(settings.networkMode, chain.chainId, hash);
   return hash;

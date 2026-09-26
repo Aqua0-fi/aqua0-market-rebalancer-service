@@ -6,9 +6,11 @@ This reports `market-rebalancer-service`, the two-leg same-chain price-arbitrage
 cross-chain repayment, fronting or repatriation worker. Registering more chains means running separate
 atomic cycles on each chain, not bridging between the two legs of a trade.
 
-Implementation is in isolated worktrees. Nothing has been deployed, enabled, funded, migrated in a
-hosted database, pushed or merged. The dashboard is available in the updated web app at
-`/admin?section=market-rebalancer`, under the existing admin authentication boundary.
+The earlier observer and dashboard are deployed to the authorized staging environment; subsequent
+source updates are separately versioned. Check `staging-rollout.md` and the latest release evidence
+for the exact deployed revisions. Onchain executor funding and live execution remain disabled.
+The dashboard uses the existing admin authentication boundary. Live runtime status and pause/resume
+controls use `/api/admin/market-rebalancer/runtime` with a separate worker control credential.
 
 ## Persistence and recovery
 

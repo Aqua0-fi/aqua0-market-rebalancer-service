@@ -8,12 +8,15 @@ does not manufacture trades when there is no economic opportunity.
 ## A complete trade
 
 1. A worker checks a configured Aqua0 pool and external Uniswap/Sushi pools on the same chain.
-2. It tests a small configured list of trade sizes in both directions. This prices the actual size,
-   including pool fees and price impact, rather than comparing two headline token prices.
+2. It selects a size from prepared V4/V3 liquidity curves or fresh actual SwapVM quotes, comparing
+   both venue orders within your spending, backing, fee and minimum-profit limits. There is no
+   manually configured sample-size list on the current search path.
 3. It applies a slippage margin and reserves a conservative fee budget, including additional rollup
    charges where applicable. A user-configured minimum net profit must remain after that budget.
-4. It refreshes the selected opportunity. Only then does it ask Aqua0 to authorize the specific JIT
-   fill. The signature binds the pool, strategy class, direction, amount, price limit, router and expiry.
+4. It recalculates the selected opportunity using current shared backing and external-pool prices.
+   For V4 it then asks Aqua0 to authorize the exact JIT fill. For SwapVM it verifies the current,
+   already-shipped order and explicit onchain permissions. No per-swap V4 authorization is invented
+   for a SwapVM program.
 5. It simulates the _whole_ transaction, including both swaps and the contract's final profit check.
 6. The executor exchanges the starting token for the intermediate token, exchanges that token back,
    and checks its final starting-token balance before returning successfully.
@@ -63,8 +66,11 @@ transport and prolonged observation are later deployment decisions.
 
 ## Exactly how Aqua0 backend information is used
 
-Yes, the service uses the existing Aqua0 backend to understand executable liquidity depth. It calls
-`POST /api/swap/quote` with a concrete pool, strategy class, direction and input amount.
+The service uses the existing Aqua0 backend to understand executable liquidity depth. The current
+V4 search calls `POST /api/swap/optimize-round-trip`, which prepares the same fleet planner and native
+simulation primitives used by the normal quote path. The SwapVM search calls
+`POST /api/swap/optimize-aqua-round-trip` and quotes the actual deployed program. Both are read-only;
+normal V4 authorization is requested only for the selected, freshly checked trade.
 
 The fleet quote service resolves the pool's actual currencies, checks strategy consent, reads fleet
 capital through `buildFleetJitPlanReader`, builds the LP-preference JIT ranges with
@@ -79,10 +85,12 @@ The quote endpoint is read-only. The authorization endpoint subsequently recheck
 reserves backing and signs the exact fill. Simultaneous activity can make a preview stale; that is why
 it refreshes, authorizes and simulates before submission.
 
-External exchanges are queried independently through their QuoterV2 contracts. Those quotes execute
-against real pool state at one RPC block and include the effect of the proposed size. The worker tests
-multiple sizes, so a large apparent price gap with very little depth is not treated as unlimited profit.
-It uses a bounded size grid; it does not claim a globally optimal trade-size algorithm.
+External V3 pools are loaded at a pinned block and priced with the prepared native concentrated-liquidity
+engine, with independent QuoterV2 parity evidence. Canonical history is verified before unchanged tick
+structure is reused; current price and liquidity are read again. V4 searches bracket the marginal-profit
+crossing and check actual integer-rounded candidates. Opaque SwapVM programs use bounded adaptive
+actual-VM evaluations, beginning with freshly re-quoted previously useful sizes. Neither path treats
+spot price as unlimited depth, and the opaque-program search does not promise a global optimum.
 
 ## Permissions and operating model
 
@@ -103,3 +111,16 @@ Offchain bookkeeping has a separate lifetime. An EVM revert cannot undo a databa
 created by the backend. For this same-chain path the existing backend expires the liquidity hold with
 the signed authorization deadline. The service requests authorization only after a fresh profitable
 quote, to avoid placing unnecessary temporary holds on LP capital.
+
+## Reaction time and operator pauses
+
+New block notifications trigger independent chain work. HTTP-only chains check their own header
+approximately every 500 milliseconds; explicitly configured WebSockets provide push notifications.
+A slow discovery request or another chain does not create a global sleep barrier. The best opportunity
+already ready can proceed without waiting for every other venue. There is still only one execution
+attempt in flight per chain, and an uncertain send blocks the next attempt until reconciliation.
+
+A newer block or saved control change invalidates queued quotes across the chain, including markets
+that share a vault. The chosen transaction is checked again against current shared backing and both
+venues. Pausing globally or per chain is durable and stops new work, but keeps tracking transactions
+already sent. Resuming does not add funds, change pair permissions or switch on live execution.

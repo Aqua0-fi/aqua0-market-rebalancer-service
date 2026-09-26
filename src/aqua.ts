@@ -1,3 +1,4 @@
+import { ReadPool } from "./read-pool.js";
 import { z } from "zod";
 import {
   address,
@@ -64,6 +65,10 @@ export function validateQuote(
     : q.execution.authorizedAmountOut;
 }
 export class AquaClient {
+  private readonly searchReads = new ReadPool(4);
+  searchStatus() {
+    return this.searchReads.status();
+  }
   constructor(
     private readonly url: string,
     private readonly headers: Record<string, string> = {},
@@ -72,12 +77,15 @@ export class AquaClient {
     path: string,
     body: unknown,
     timeout = 10000,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     const response = await fetch(new URL(path, this.url), {
       method: "POST",
       headers: { "content-type": "application/json", ...this.headers },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeout),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(timeout)])
+        : AbortSignal.timeout(timeout),
       redirect: "error",
     });
     if (!response.ok) throw new Error(`Aqua0 ${path} HTTP ${response.status}`);
@@ -157,50 +165,70 @@ export class AquaClient {
     return response.json();
   }
   async optimizeSwapVM(request: SwapVMSizingRequest) {
-    const quotedAt = Date.now();
-    const raw = await this.post(
-      "/api/swap/optimize-aqua-round-trip",
-      {
-        venue: "aqua",
-        chainId: request.chain.chainId,
-        stableStrategyId: request.market.stableStrategyId,
-        caller: request.caller,
-        baseToken: request.policy.baseToken,
-        externalPool: request.external.address,
-        externalFactory: request.external.venue.factory,
-        maxInput: request.maxInput.toString(),
-        gasBudget: request.gasBudget.toString(),
-        minNetProfit: request.policy.minNetProfit,
-        slippageBps: request.slippageBps,
-        ...(request.fixedAmount === undefined
-          ? {}
-          : { fixedAmount: request.fixedAmount.toString() }),
+    return this.searchReads.run(
+      async () => {
+        const quotedAt = Date.now();
+        const raw = await this.post(
+          "/api/swap/optimize-aqua-round-trip",
+          {
+            venue: "aqua",
+            chainId: request.chain.chainId,
+            stableStrategyId: request.market.stableStrategyId,
+            caller: request.caller,
+            baseToken: request.policy.baseToken,
+            externalPool: request.external.address,
+            externalFactory: request.external.venue.factory,
+            maxInput: request.maxInput.toString(),
+            gasBudget: request.gasBudget.toString(),
+            minNetProfit: request.policy.minNetProfit,
+            slippageBps: request.slippageBps,
+            ...(request.fixedAmount === undefined
+              ? {}
+              : { fixedAmount: request.fixedAmount.toString() }),
+          },
+          30000,
+          request.signal,
+        );
+        return acceptSwapVMOptimization(raw, request, quotedAt);
       },
-      30000,
+      request.signal,
+      request.executionPriority ? 1 : 0,
+      String(request.chain.chainId),
     );
-    return acceptSwapVMOptimization(raw, request, quotedAt);
   }
 
   async optimize(request: Omit<SizingRequest, "quotedAt">) {
-    const quotedAt = Date.now();
-    const { chain, pool, market, external } = request;
-    const raw = await this.post("/api/swap/optimize-round-trip", {
-      venue: "v4",
-      chainId: chain.chainId,
-      poolId: pool.poolId,
-      classId: market.classId.toString(),
-      token0: pool.currency0,
-      token1: pool.currency1,
-      tickSpacing: pool.tickSpacing,
-      baseToken: market.baseToken,
-      externalPool: external.address,
-      externalFactory: external.venue.factory,
-      maxInput: request.maxInput.toString(),
-      minNetProfit: market.minNetProfit.toString(),
-      gasBudget: request.gasBudget.toString(),
-      slippageBps: request.slippageBps,
-    });
-    return acceptOptimizedCandidates(raw, { ...request, quotedAt });
+    return this.searchReads.run(
+      async () => {
+        const quotedAt = Date.now();
+        const { chain, pool, market, external } = request;
+        const raw = await this.post(
+          "/api/swap/optimize-round-trip",
+          {
+            venue: "v4",
+            chainId: chain.chainId,
+            poolId: pool.poolId,
+            classId: market.classId.toString(),
+            token0: pool.currency0,
+            token1: pool.currency1,
+            tickSpacing: pool.tickSpacing,
+            baseToken: market.baseToken,
+            externalPool: external.address,
+            externalFactory: external.venue.factory,
+            maxInput: request.maxInput.toString(),
+            minNetProfit: market.minNetProfit.toString(),
+            gasBudget: request.gasBudget.toString(),
+            slippageBps: request.slippageBps,
+          },
+          10000,
+          request.signal,
+        );
+        return acceptOptimizedCandidates(raw, { ...request, quotedAt });
+      },
+      request.signal,
+      request.executionPriority ? 1 : 0,
+      String(request.chain.chainId),
+    );
   }
 
   async quote(
