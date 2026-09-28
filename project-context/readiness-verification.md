@@ -65,3 +65,7 @@ Review and deploy the scoped branches to staging, verify exact revisions and pro
 ### Registry-byte preservation
 
 The original formatter included byte-hashed registry inputs and output. Reformatting them changed the recorded hashes without changing their JSON values. The exact original bytes are retained, those three data files are excluded from formatting, and the normal check command now independently verifies their hashes and chain identities. The complete registry is also checked against the current sibling backend source. No chain address, venue permission or risk policy was changed by this fix.
+
+### Clean Linux CI compiler provisioning
+
+The first remote worker CI passed all 84 Node tests but could not resolve the newer Solidity releases through its pinned Foundry release lookup. CI now provisions exactly 0.8.37 and the legacy-fixture-only 0.8.34 from official Solidity release assets, verifies their reviewed SHA256 values before making them executable, checks each version string, then runs Foundry offline against that cache. Existing compiler cache mismatches fail instead of being overwritten. The production compiler pin and all tests are unchanged. The new remote run must pass before Linux build success is claimed.
