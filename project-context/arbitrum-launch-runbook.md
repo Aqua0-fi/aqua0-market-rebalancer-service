@@ -45,7 +45,7 @@ Keep the original persistent journal, SQLite history, economic-review state, pri
 
 ## Optional 90% LP return
 
-The Arbitrum LP tab has a separate hackathon preview. The protected GET endpoint is `/api/admin/market-rebalancer/profit-share?chainId=42161&token=STARTING_TOKEN`. It accepts no success-only, wallet or time filter that could hide losses. It verifies a complete initial batch of at most 20 executions and refuses pending or noncanonical receipts, unknown costs, mixed profit assets and incomplete actual LP evidence.
+The Arbitrum LP tab has an explicit `Review 90% LP return` button. No preview is fetched on page load, no timer runs, and no completed trade triggers a payout. Only an authenticated click requests fresh evidence. Closing a review discards its result; failures never auto-retry. The button prepares a review and unsigned export, not a payment. The Arbitrum LP tab has a separate hackathon preview. The protected GET endpoint is `/api/admin/market-rebalancer/profit-share?chainId=42161&token=STARTING_TOKEN`. It accepts no success-only, wallet or time filter that could hide losses. It verifies a complete initial batch of at most 20 executions and refuses pending or noncanonical receipts, unknown costs, mixed profit assets and incomplete actual LP evidence.
 
 The distributable pool is 90% of positive batch trading gain after both successful and reverted transaction fees. Native fees are valued in the starting token at the receipt block; this is an explicit historical conversion, not a claim that gas was actually paid in USDC. Deployment, hosting and payout-transaction costs are not included and must be reviewed separately.
 

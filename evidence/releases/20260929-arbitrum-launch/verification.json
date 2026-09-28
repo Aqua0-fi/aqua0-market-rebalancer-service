@@ -1,11 +1,11 @@
 {
-  "recordedAt": "2026-09-28T23:06:28.951160+00:00",
+  "recordedAt": "2026-09-28T23:17:27.259194+00:00",
   "scope": "Arbitrum readiness and optional owner-reviewed initial hackathon return batch",
   "backendCommit": "76c669ee4e532fc13dfab89a62122a14d0bd08f7",
-  "frontendCommit": "979e6a5d1c24080f05ac3e082c74358efed7961b",
+  "frontendCommit": "96189b2ec16cdf29a0bc0058378227909815c98a",
   "backendPR": 602,
   "frontendPR": 612,
-  "stagingDeployment": "not yet performed for this launch branch",
+  "stagingDeployment": "Backend PR602 and frontend PR612 are open. At the last check their self-hosted Linux checks were queued without an assigned runner. No staging merge or launch-branch deployment occurred.",
   "workerUnitPassed": 89,
   "contractUnitPassed": 47,
   "localTransactionIntegrationsPassed": 2,
@@ -38,14 +38,22 @@
     "notLiveProfitability": true
   },
   "frontend": {
-    "fullTestsPassed": 6271,
+    "fullTestsPassed": 6277,
     "skipped": 50,
     "fullLintErrors": 0,
     "inheritedLintWarnings": 34,
     "typecheck": "passed",
     "productionBuild": "passed",
     "desktopMobileBrowser": "passed",
-    "lastCopyChange": "Final payment-status wording was verified by focused tests, typecheck, build and browser after the full suite."
+    "lastCopyChange": "Final manual-button implementation passed the complete frontend suite and production build.",
+    "manualReview": {
+      "explicitButton": true,
+      "fetchOnMount": false,
+      "automaticPayout": false,
+      "focusedAuthAndUiTestsPassed": 17,
+      "signingOrSubmissionInUi": false,
+      "browserQualification": "Desktop/mobile browser proof covers actual preview layout and unsigned export. Manual action/authentication behavior is verified by component/action tests, not a live payout."
+    }
   },
   "backend": {
     "testsPassed": 5553,
@@ -109,6 +117,11 @@
     "arbitrum-launch-web-build-release.log": "08224c70c27ae4cb23f26584bc613798a53c11a2964e88810eebf473df966feb",
     "arbitrum-launch-browser-final.log": "ba2cb9c0cf1cebd41034d4b682a32bc2b1a4e7b4d9c57cb809f220ec9fa6acb4",
     "arbitrum-launch-backend-tests.log": "74c1f7af6d539534d18f70a03d1628246a684002f7ca3f6002e3e773a78c80f7",
-    "arbitrum-launch-backend-baseline-tests.log": "3b6a5e8998e59e5893bdc4e29146d05b6e8627ebcaa8756163e5653cd8050b21"
-  }
+    "arbitrum-launch-backend-baseline-tests.log": "3b6a5e8998e59e5893bdc4e29146d05b6e8627ebcaa8756163e5653cd8050b21",
+    "manual-return-final-tests.log": "4b29250f2f08891f8c309d96e9ec38b19a4c1189d7932578d8a4cfa69b4fd0b4",
+    "manual-return-web-full-tests.log": "4bf8b031a83f106b159baa71e35dc1b9260bafa2a4d33a99c5f29d3b51a2b8d1",
+    "manual-return-web-build.log": "c4922aad7c5a19763dadc75452f5c65cd3d4f50915c90cdee183f90623798895"
+  },
+  "workerImplementationCommit": "247badd7d1bf07b254767b0a0162aeaae62a4677",
+  "workerPR": 4
 }
