@@ -4,10 +4,17 @@ import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MarketRebalancer, PoolKey} from "../src/MarketRebalancer.sol";
+import {ProfitReturnDistributor} from "../src/ProfitReturnDistributor.sol";
 import {ISwapVMVenue, IFleetAquaMaker} from "../src/SwapVMVenue.sol";
 
 interface IProductionRegistry {
     function vaultForAsset(address token) external view returns (address);
+}
+
+interface IProductionVaultCapacity {
+    function availableFor(uint256) external view returns (uint256);
+    function committersOf(uint256) external view returns (address[] memory);
+    function freePrincipal(address) external view returns (uint256);
 }
 
 interface IProductionMaker {
@@ -66,11 +73,13 @@ contract ProductionAquaAdapterForkTest is Test {
     bytes32 constant SETTLED = keccak256("ClassVenueSettled(address,uint256,address,int256)");
 
     function setUp() public {
-        string memory cfg = vm.readFile("config/production-maker-fork.json");
+        string memory cfg =
+            vm.readFile(vm.envOr("PRODUCTION_MAKER_FIXTURE", string("config/production-maker-fork.json")));
         vm.createSelectFork(
-            vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org")), vm.parseJsonUint(cfg, ".block")
+            vm.envOr("PRODUCTION_MAKER_RPC_URL", vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org"))),
+            vm.parseJsonUint(cfg, ".block")
         );
-        assertEq(block.chainid, 8453);
+        assertEq(block.chainid, vm.envOr("PRODUCTION_MAKER_CHAIN_ID", uint256(8453)));
         router = vm.parseJsonAddress(cfg, ".router");
         aqua = vm.parseJsonAddress(cfg, ".aqua");
         maker = vm.parseJsonAddress(cfg, ".maker");
@@ -196,9 +205,9 @@ contract ProductionAquaAdapterForkTest is Test {
         direct(false);
     }
 
-    function displace(bool zeroForOne) internal {
+    function displace(bool zeroForOne, uint256 amount) internal {
         callbackToken = zeroForOne ? token0 : token1;
-        callbackBudget = 100_000e6;
+        callbackBudget = amount;
         deal(callbackToken, address(this), callbackBudget);
         displacing = true;
         IProductionV3(externalPool)
@@ -222,20 +231,46 @@ contract ProductionAquaAdapterForkTest is Test {
         IERC20(callbackToken).transfer(msg.sender, amount);
     }
 
+    function physicalCapacity(address vault) internal view returns (uint256) {
+        IProductionVaultCapacity v = IProductionVaultCapacity(vault);
+        uint256 available = v.availableFor(classId);
+        address[] memory lps = v.committersOf(classId);
+        require(lps.length <= 256, "Unbounded production committer set");
+        uint256 free;
+        for (uint256 i; i < lps.length; i++) {
+            free += v.freePrincipal(lps[i]);
+        }
+        return available < free ? available : free;
+    }
+
     function cycle(bool aquaFirst) internal returns (MarketRebalancer.Trade memory t) {
-        // Synthetic price movement is ONLY on the external venue. Production strategy and vault state are not fabricated.
-        displace(aquaFirst);
+        // Search bounded local displacement rather than draining the real tiny vault's curve.
+        // Neither real LP balances, commitments nor the shipped program are changed.
         uint256 firstOut;
         uint256 finalOut;
-        if (aquaFirst) {
-            firstOut = quoteVM(token0, token1, INPUT);
-            (finalOut,,,) = quoter.quoteExactInputSingle(IProductionQuoter.Input(token1, token0, firstOut, fee, 0));
-        } else {
-            (firstOut,,,) = quoter.quoteExactInputSingle(IProductionQuoter.Input(token0, token1, INPUT, fee, 0));
-            finalOut = quoteVM(token1, token0, firstOut);
+        uint256 cap = physicalCapacity(aquaFirst ? vault1 : vault0);
+        bool found;
+        for (uint256 attempt; attempt < 12; attempt++) {
+            uint256 snapshot = vm.snapshotState();
+            displace(aquaFirst, uint256(1e6) << attempt);
+            if (aquaFirst) {
+                firstOut = quoteVM(token0, token1, INPUT);
+                (finalOut,,,) = quoter.quoteExactInputSingle(IProductionQuoter.Input(token1, token0, firstOut, fee, 0));
+            } else {
+                (firstOut,,,) = quoter.quoteExactInputSingle(IProductionQuoter.Input(token0, token1, INPUT, fee, 0));
+                finalOut = quoteVM(token1, token0, firstOut);
+            }
+            uint256 physicalOutput = aquaFirst ? firstOut : finalOut;
+            if (finalOut > INPUT && physicalOutput <= cap) {
+                found = true;
+                emit log_named_uint("Synthetic external displacement", uint256(1e6) << attempt);
+                break;
+            }
+            require(vm.revertToState(snapshot), "Failed to restore trial state");
         }
+        require(found, "No profitable bounded-displacement fixture within actual vault backing");
+        emit log_named_uint("Actual physical output capacity", cap);
         emit log_named_uint("Round trip quoted output", finalOut);
-        require(finalOut > INPUT, "Displaced route must actually quote a profit");
         PoolKey memory empty;
         t.id = keccak256(abi.encode("production-maker-local-test", aquaFirst));
         t.deadline = block.timestamp + 60;
@@ -307,5 +342,93 @@ contract ProductionAquaAdapterForkTest is Test {
         assertEq(a0, v0);
         assertEq(a1, v1);
         assertFalse(bot.used(t.id));
+    }
+
+    function testFork_ActualVaultSourcesReceiveNinetyPercentOfLocalNetProfit() public {
+        // Foundry-only transaction has zero gas price. This proves the payout path, not live economics.
+        vm.txGasPrice(0);
+        MarketRebalancer.Trade memory t = cycle(true);
+        vm.recordLogs();
+        uint256 profit = bot.execute(t);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        address[] memory lp = new address[](logs.length);
+        uint256[] memory principal = new uint256[](logs.length);
+        uint256 count;
+        uint256 total;
+        for (uint256 i; i < logs.length; i++) {
+            Vm.Log memory l = logs[i];
+            if (
+                l.emitter != vault1 || l.topics.length != 4 || l.topics[0] != SOLD
+                    || address(uint160(uint256(l.topics[1]))) != vault1 || uint256(l.topics[2]) != classId
+            ) continue;
+            address source = address(uint160(uint256(l.topics[3])));
+            uint256 sold = abi.decode(l.data, (uint256));
+            assertGt(sold, 0);
+            uint256 j;
+            for (; j < count && lp[j] != source; j++) {}
+            if (j == count) lp[count++] = source;
+            principal[j] += sold;
+            total += sold;
+        }
+        assertGt(count, 0);
+        assertLe(count, 100);
+        assertEq(total, t.first.minOut);
+        for (uint256 i; i < count; i++) {
+            for (uint256 j = i + 1; j < count; j++) {
+                if (lp[j] < lp[i]) {
+                    (lp[i], lp[j]) = (lp[j], lp[i]);
+                    (principal[i], principal[j]) = (principal[j], principal[i]);
+                }
+            }
+        }
+        uint256 returned = profit * 9 / 10;
+        uint256[] memory shares = new uint256[](count);
+        uint256[] memory remainder = new uint256[](count);
+        uint256 allocated;
+        for (uint256 i; i < count; i++) {
+            shares[i] = returned * principal[i] / total;
+            remainder[i] = returned * principal[i] % total;
+            allocated += shares[i];
+        }
+        while (allocated < returned) {
+            uint256 best;
+            for (uint256 i = 1; i < count; i++) {
+                if (remainder[i] > remainder[best]) best = i;
+            }
+            shares[best]++;
+            remainder[best] = 0;
+            allocated++;
+        }
+        uint256 positive;
+        for (uint256 i; i < count; i++) {
+            if (shares[i] > 0) positive++;
+        }
+        address[] memory recipients = new address[](positive);
+        uint256[] memory amounts = new uint256[](positive);
+        uint256[] memory beforeBalances = new uint256[](positive);
+        uint256 next;
+        for (uint256 i; i < count; i++) {
+            if (shares[i] == 0) continue;
+            recipients[next] = lp[i];
+            amounts[next] = shares[i];
+            beforeBalances[next] = IERC20(token0).balanceOf(lp[i]);
+            next++;
+        }
+        bot.withdraw(token0, address(this), profit);
+        assertEq(IERC20(token0).balanceOf(address(bot)), 5e6, "Operating principal stays in executor");
+        ProfitReturnDistributor distributor = new ProfitReturnDistributor(address(this), address(bot), token0);
+        IERC20(token0).approve(address(distributor), returned);
+        bytes32[] memory ids = new bytes32[](1);
+        ids[0] = keccak256(abi.encode("synthetic-local-execution-id", t.id));
+        distributor.distribute(ids, keccak256(abi.encode(logs)), profit, recipients, amounts);
+        for (uint256 i; i < positive; i++) {
+            assertEq(IERC20(token0).balanceOf(recipients[i]), beforeBalances[i] + amounts[i]);
+        }
+        assertEq(IERC20(token0).balanceOf(address(distributor)), 0);
+        assertEq(IERC20(token0).allowance(address(this), address(distributor)), 0);
+        assertTrue(distributor.processed(ids[0]));
+        emit log_named_uint("Actual local cycle profit", profit);
+        emit log_named_uint("Returned to actual LP source wallets", returned);
+        emit log_named_uint("LP recipients", positive);
     }
 }
