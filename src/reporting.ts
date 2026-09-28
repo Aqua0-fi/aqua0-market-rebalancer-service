@@ -1,3 +1,4 @@
+import { economicsReviewSchema, type EconomicsSnapshot } from "./economics.js";
 import { RuntimeControls, runtimeChangeSchema } from "./runtime-controls.js";
 import {
   createServer,
@@ -11,6 +12,9 @@ import type { SwapVMMarketCatalog } from "./swapvm-catalog.js";
 import { MarketCatalog, marketPolicyInput } from "./market-catalog.js";
 
 export interface ReportOptions {
+  economicReview?:
+    | ((input: unknown, actor: string) => Promise<EconomicsSnapshot>)
+    | undefined;
   controls?: RuntimeControls | undefined;
   onPolicyChanged?: ((chainId: number) => void) | undefined;
   network: "mainnet" | "fork";
@@ -75,6 +79,60 @@ export function createReportServer(options: ReportOptions) {
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
+      if (req.method === "POST" && url.pathname === "/v1/economics/review") {
+        if (!controlsAuthorized(req)) {
+          send(res, 401, {
+            error: "Separate operator-control credential required",
+          });
+          return;
+        }
+        if (!options.economicReview) {
+          send(res, 503, { error: "Economic review is unavailable" });
+          return;
+        }
+        if (!req.headers["content-type"]?.startsWith("application/json")) {
+          send(res, 415, { error: "JSON body required" });
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const part of req) {
+          const buffer = Buffer.from(part);
+          size += buffer.length;
+          if (size > 4096) {
+            send(res, 413, { error: "Review request is too large" });
+            return;
+          }
+          chunks.push(buffer);
+        }
+        const body = z
+          .object({
+            network: z.literal(options.network),
+            actor: z.string().min(1).max(120),
+            change: economicsReviewSchema,
+          })
+          .strict()
+          .parse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        try {
+          const state = await options.economicReview(body.change, body.actor);
+          options.onPolicyChanged?.(0);
+          send(res, 200, {
+            version: 1,
+            state,
+            tradingPermissionsChanged: false,
+          });
+        } catch (error) {
+          const conflict =
+            error instanceof Error &&
+            /version conflict|history changed/.test(error.message);
+          send(res, conflict ? 409 : 503, {
+            error: conflict
+              ? "Economic evidence changed. Refresh and inspect it before reviewing again."
+              : "Economic review was not confirmed. Pending receipts, missing fees or chain evidence must be reconciled; refresh before retrying.",
+          });
+        }
+        return;
+      }
       if (req.method === "POST" && url.pathname === "/v1/runtime") {
         if (!controlsAuthorized(req)) {
           send(res, 401, {
@@ -262,6 +320,7 @@ export function createReportServer(options: ReportOptions) {
         send(res, 200, {
           ...(options.status() as object),
           runtimeControlAvailable: !!options.controls && !!controlHash,
+          economicReviewAvailable: !!options.economicReview && !!controlHash,
         });
         return;
       }

@@ -32,9 +32,7 @@ export interface KmsAccountConfig {
   target?: Address;
 }
 export interface KmsTransport {
-  publicKey(
-    keyId: string,
-  ): Promise<{
+  publicKey(keyId: string): Promise<{
     keyId: string;
     keySpec: string;
     keyUsage: string;

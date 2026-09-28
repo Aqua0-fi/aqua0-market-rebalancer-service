@@ -1,5 +1,7 @@
 # Aqua0 market-rebalancer-service
 
+Latest candidate: [Arbitrum readiness, LP wallets and economic review](project-context/readiness-verification.md). This records local verification separately from staging deployment and live activation.
+
 Private service for bringing Aqua0 market prices closer to external exchanges through profitable,
 atomic, same-chain round trips. Service name: `market-rebalancer-service`.
 

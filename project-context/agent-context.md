@@ -1,5 +1,13 @@
 # Context
 
+## Latest release reference
+
+Read `readiness-verification.md` and `evidence/releases/20260928-readiness/release.json` before continuing. The September 28 staging release includes the LP-wallet tab, receipt-based economic reporting, separate loss review, scoped price-policy controls and an Arbitrum-only observer. Backend staging is `a9d1e4ea93bda37638b8bba11f32efc9652bc2fa`; frontend staging is `06ecf1233dfab9e46da64119bdca92c772212ca0`. The existing AWS image still uses worker source `2a0db3043f2ee26f025e2c23105565f84735003a`, not a later documentation commit.
+
+The latest protected runtime read and desktop/mobile browser replay passed. The worker has zero configured markets and execution disabled. Discovered pools and stale historical catalog rows are not approvals or active trading. Funding, a reviewed executor and explicit pilot limits/activation remain separate actions. The production-maker SwapVM reverse-order fork issue remains unresolved, and the proposed 90% LP profit sharing remains unimplemented hackathon-only work. Do not repeat completed staging deployments or infer production/main permission from this release.
+
+## Original project context
+
 The user requested a private service to keep Aqua0 prices aligned with other exchanges and help
 bootstrap genuine trading. They subsequently required the name `market-rebalancer-service` throughout,
 strong atomicity and profitability checks, and a plain-English explanation of the backend's role.

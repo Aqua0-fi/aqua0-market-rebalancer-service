@@ -36,6 +36,11 @@ export class Journal {
       this.state = {};
     }
   }
+  pendingAccounts(): string[] {
+    return Object.entries(this.state)
+      .filter(([, value]) => value.pending !== undefined)
+      .map(([key]) => key);
+  }
   get(key: string): Entry {
     return (
       this.state[key] ?? {

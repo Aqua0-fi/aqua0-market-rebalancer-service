@@ -1,4 +1,9 @@
 import {
+  assertEconomicExecution,
+  verifyEconomicAnchors,
+} from "./economic-gate.js";
+import { valueSettlementFees } from "./settlement-economics.js";
+import {
   createWalletClient,
   http,
   keccak256,
@@ -31,7 +36,15 @@ export async function submit(
     throw new Error("Broadcast disabled");
   if (!chain.executionReviewed || chain.feeModel === "unsupported")
     throw new Error("Chain execution capability is not reviewed");
+  assertEconomicExecution(history, settings.networkMode);
+  await verifyEconomicAnchors(
+    history,
+    settings.networkMode,
+    chain.chainId,
+    client,
+  );
   beforeBroadcast?.();
+  assertEconomicExecution(history, settings.networkMode);
   const account = await workerAccount(
     chain.chainId,
     config,
@@ -253,6 +266,7 @@ export async function submit(
     transport: http(rpcUrl(chain)),
   });
   beforeBroadcast?.(simulatedAt);
+  assertEconomicExecution(history, settings.networkMode);
   onProgress?.("signing");
   const signed = await wallet.signTransaction({
     chain: null,
@@ -265,6 +279,7 @@ export async function submit(
     nonce,
   });
   beforeBroadcast?.(simulatedAt);
+  assertEconomicExecution(history, settings.networkMode);
   const hash = keccak256(signed);
   const journalKey = `${chain.chainId}:${account.address.toLowerCase()}`;
   // Persist the deterministic hash BEFORE broadcast. An uncertain response cannot cause a second send.
@@ -320,7 +335,12 @@ export async function reconcile(
         chain.chainId,
         e.pending.hash,
         receipt.status === "success" ? "confirmed" : "reverted",
-        executionReceipt(prepared, receipt, canonical.timestamp, chain),
+        await valueSettlementFees(
+          client,
+          prepared,
+          receipt,
+          executionReceipt(prepared, receipt, canonical.timestamp, chain),
+        ),
       );
     }
     const { pending: _, ...rest } = e;

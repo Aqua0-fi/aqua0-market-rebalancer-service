@@ -162,6 +162,7 @@ for (const signerMode of ["local", "kms"] as const) {
         ...source,
         chainId: 31337,
         feeModel: "gas-limit",
+        nativeCurrency: { symbol: "ETH", decimals: 18 },
         rpcEnv: "REBALANCER_TEST_RPC",
         publicRpc: url,
         universalRouter: router,
@@ -311,6 +312,46 @@ for (const signerMode of ["local", "kms"] as const) {
           "cancelled work must not spend a nonce",
         );
       }
+      for (const pauseAt of [2, 3]) {
+        let checks = 0;
+        await assert.rejects(
+          () =>
+            submit(
+              client,
+              chain,
+              config,
+              candidate,
+              journal,
+              history,
+              signerMode === "kms" ? signing.transport : undefined,
+              () => {
+                if (++checks === pauseAt)
+                  history.latchEconomics("fork", "net_loss");
+              },
+            ),
+          /Economic review required/,
+        );
+        assert.equal(
+          await client.getTransactionCount({ address: account.address }),
+          nonceBefore,
+          "a loss pause before or after signing must not broadcast",
+        );
+        assert.equal(
+          journal.get(`31337:${account.address.toLowerCase()}`).pending,
+          undefined,
+        );
+        const status = history.economics("fork");
+        history.reviewEconomics(
+          "fork",
+          {
+            expectedVersion: status.version,
+            throughSettlement: status.throughSettlement,
+            acknowledgeLosses: true,
+            reason: "Reset the deliberately latched local cancellation fixture",
+          },
+          "test-only",
+        );
+      }
       const signedBefore = signing.digests.length;
       const hash = await submit(
         client,
@@ -352,6 +393,19 @@ for (const signerMode of ["local", "kms"] as const) {
       assert.equal(report?.receipt?.grossProfit, (14n * 10n ** 18n).toString());
       assert(report?.receipt?.blockHash);
       assert(BigInt(report?.receipt?.totalGasNative ?? "0") > 0n);
+      assert.equal(
+        report?.receipt?.feeValuation?.nativeCost,
+        report?.receipt?.totalGasNative,
+      );
+      assert.equal(report?.receipt?.feeValuation?.method, "native-equivalent");
+      assert.equal(history.economics("fork").blocked, false);
+      assert.equal(
+        history.economics("fork").totals[0]?.netResult,
+        (
+          14n * 10n ** 18n -
+          BigInt(report!.receipt!.totalGasNative!)
+        ).toString(),
+      );
       if (process.env.REBALANCER_EXECUTION_PROOF_OUTPUT) {
         const receipt = await client.getTransactionReceipt({ hash });
         const transaction = await client.getTransaction({ hash });

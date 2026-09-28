@@ -29,6 +29,17 @@ export function preparedExecution(
     throw new Error("Missing Aqua0 leg");
   return {
     version: 1,
+    feePolicy: {
+      feeModel: chain.feeModel,
+      nativeCurrency: chain.nativeCurrency ?? null,
+      nativeEquivalent: chain.nativeEquivalent ?? null,
+      wrappedNative: config.wrappedNative,
+      gasConversionFee: config.gasConversionFee,
+      venues: chain.venues.map((v) => ({
+        factory: v.factory,
+        quoter: v.quoter,
+      })),
+    },
     network: settings.networkMode,
     chainId: chain.chainId,
     transactionHash: hash,
