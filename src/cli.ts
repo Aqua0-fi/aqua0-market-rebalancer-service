@@ -1,4 +1,8 @@
-import { runtimeScope, assertPendingScope } from "./runtime-scope.js";
+import {
+  runtimeScope,
+  assertPendingScope,
+  receiptReviewClients,
+} from "./runtime-scope.js";
 import { reviewEconomicWindow } from "./economic-review.js";
 import { RuntimeControls } from "./runtime-controls.js";
 import { runReactive } from "./reactive-runner.js";
@@ -178,6 +182,7 @@ if (command === "doctor") {
       controls,
     );
     if (command === "run") {
+      const reviewClient = receiptReviewClients(registeredChains, clientFor);
       server = createReportServer({
         network: settings.networkMode,
         token: process.env.REBALANCER_REPORT_TOKEN,
@@ -192,7 +197,7 @@ if (command === "doctor") {
             settings.networkMode,
             input,
             actor,
-            (chainId) => runner.client(chainId),
+            reviewClient,
           ),
         hostHealth: () => {
           const path = process.env.REBALANCER_HOST_HEALTH_FILE;

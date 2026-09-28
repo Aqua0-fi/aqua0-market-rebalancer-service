@@ -93,3 +93,23 @@ test("narrowing a worker cannot abandon an out-of-scope pending transaction or r
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("explicit receipt review can read a previously used chain without activating it", async () => {
+  const { receiptReviewClients } = await import("../src/runtime-scope.js");
+  const made: number[] = [];
+  const resolve = receiptReviewClients(chains, (chain) => {
+    made.push(chain.chainId);
+    return { chainId: chain.chainId } as unknown as import("viem").PublicClient;
+  });
+  const scope = runtimeScope(chains, settings, "42161");
+  assert.deepEqual(made, []);
+  const first = resolve(8453);
+  assert.equal(resolve(8453), first);
+  assert.deepEqual(made, [8453]);
+  assert.deepEqual(
+    scope.chains.map((chain) => chain.chainId),
+    [42161],
+  );
+  assert.deepEqual(Object.keys(scope.settings.execution), ["42161"]);
+  assert.throws(() => resolve(999999), /Unknown receipt-review chain/);
+});

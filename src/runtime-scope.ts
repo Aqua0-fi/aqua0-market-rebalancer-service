@@ -58,3 +58,21 @@ export function assertPendingScope(
       );
   }
 }
+
+/** Lazy read-only clients for explicit historical receipt review, never discovery or signing. */
+export function receiptReviewClients(
+  registered: ChainConfig[],
+  makeClient: (chain: ChainConfig) => import("viem").PublicClient,
+): (chainId: number) => import("viem").PublicClient {
+  const clients = new Map<number, import("viem").PublicClient>();
+  return (chainId) => {
+    const chain = registered.find((entry) => entry.chainId === chainId);
+    if (!chain) throw new Error("Unknown receipt-review chain");
+    let client = clients.get(chainId);
+    if (!client) {
+      client = makeClient(chain);
+      clients.set(chainId, client);
+    }
+    return client;
+  };
+}

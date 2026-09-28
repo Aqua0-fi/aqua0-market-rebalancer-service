@@ -69,3 +69,7 @@ The original formatter included byte-hashed registry inputs and output. Reformat
 ### Clean Linux CI compiler provisioning
 
 The first remote worker CI passed all 84 Node tests but could not resolve the newer Solidity releases through its pinned Foundry release lookup. CI now provisions exactly 0.8.37 and the legacy-fixture-only 0.8.34 from official Solidity release assets, verifies their reviewed SHA256 values before making them executable, checks each version string, then runs Foundry offline against that cache. Existing compiler cache mismatches fail instead of being overwritten. The production compiler pin and all tests are unchanged. The new remote run must pass before Linux build success is claimed.
+
+### Historical receipt review after chain selection
+
+The explicit economic-review action retains lazy read-only access to all registered chains so an Arbitrum-only runtime can still review its own older receipts from another chain. That does not activate discovery, signing or trading on the older chain. Startup still rejects any excluded pending transaction. The focused regression verifies this separation and unknown-chain refusal.
