@@ -7,7 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
-import {MarketRebalancer, PoolKey as ExecutorPoolKey} from "../src/MarketRebalancer.sol";
+import {ICompilerRebalancer, MarketRebalancer, PoolKey as ExecutorPoolKey} from "./generated/CompilerRebalancer.sol";
 import {V4Adapter} from "aqua0/v4/V4Adapter.sol";
 import {V4Types} from "aqua0/lib/Types.sol";
 import {AssetVault} from "aqua0/vault/AssetVault.sol";
@@ -30,7 +30,7 @@ interface IMarketPool {
 /// @dev Real tokens, V3 pool, V4 PoolManager, UniversalRouter and Permit2; local Aqua0 vaults/hook.
 /// Only the local Aqua0 price and test inventory are seeded. No live key, admin or user funds are used.
 contract MarketRebalancerForkTest is Test {
-    MarketRebalancer rebalancer;
+    ICompilerRebalancer rebalancer;
     V4Adapter hook;
     AssetVault vault0;
     AssetVault vault1;
@@ -96,12 +96,19 @@ contract MarketRebalancerForkTest is Test {
             keccak256(abi.encode(hook.CLASS_APPROVAL_TYPEHASH(), keccak256(abi.encode(key)), CLASS, true, 0, deadline));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(strategistPk, _digest(approval));
         hook.approveClassForPool(key, CLASS, 0, deadline, abi.encodePacked(r, s, v));
-        rebalancer = new MarketRebalancer(
-            address(this),
-            router,
-            vm.parseJsonAddress(config, string.concat(row, ".permit2")),
-            hookAddress,
-            vm.parseJsonBool(config, string.concat(row, ".extendedV4Encoding"))
+        // The legacy Aqua0 fixtures compile unchanged with 0.8.34. The deployed executor is the
+        // separately built production artifact pinned to 0.8.37, not an old compiler copy.
+        rebalancer = ICompilerRebalancer(
+            deployCode(
+                "contracts/src/MarketRebalancer.sol:MarketRebalancer",
+                abi.encode(
+                    address(this),
+                    router,
+                    vm.parseJsonAddress(config, string.concat(row, ".permit2")),
+                    hookAddress,
+                    vm.parseJsonBool(config, string.concat(row, ".extendedV4Encoding"))
+                )
+            )
         );
         rebalancer.setOperator(address(this), true);
         amount = IERC20Metadata(token0).decimals() >= 18 ? 0.01 ether : 10 * 10 ** IERC20Metadata(token0).decimals();
@@ -199,7 +206,7 @@ contract MarketRebalancerForkTest is Test {
 
     function _leg(bool aqua, bool zeroForOne, uint256 input) private view returns (MarketRebalancer.Leg memory) {
         return MarketRebalancer.Leg(
-            aqua ? MarketRebalancer.Venue.Aqua0V4 : MarketRebalancer.Venue.V3,
+            MarketRebalancer.Venue.wrap(aqua ? 0 : 1),
             aqua ? router : v3,
             zeroForOne ? token0 : token1,
             zeroForOne ? token1 : token0,
@@ -260,7 +267,7 @@ contract MarketRebalancerForkTest is Test {
         MarketRebalancer.Trade memory trade = _trade(true);
         trade.minProfit = type(uint128).max;
         uint256 beforeBalance = IERC20(token0).balanceOf(address(rebalancer));
-        vm.expectRevert(MarketRebalancer.Unprofitable.selector);
+        vm.expectRevert(ICompilerRebalancer.Unprofitable.selector);
         rebalancer.execute(trade);
         assertEq(IERC20(token0).balanceOf(address(rebalancer)), beforeBalance);
         assertFalse(rebalancer.used(trade.id));
@@ -268,7 +275,7 @@ contract MarketRebalancerForkTest is Test {
     }
 }
 
-import {IV3Pool, IUniversalRouter, IPermit2} from "../src/MarketRebalancer.sol";
+import {IV3Pool, IUniversalRouter, IPermit2} from "./generated/CompilerRebalancer.sol";
 
 /// @dev Test-only single-leg probe. Never deployed by the rebalancer or included in production sources.
 contract ForkLegProbe {
@@ -286,7 +293,7 @@ contract ForkLegProbe {
 
     function swap(MarketRebalancer.Leg memory leg) external returns (uint256) {
         uint256 beforeBalance = IERC20(leg.tokenOut).balanceOf(address(this));
-        if (leg.venue == MarketRebalancer.Venue.Aqua0V4) {
+        if (MarketRebalancer.Venue.unwrap(leg.venue) == 0) {
             IERC20(leg.tokenIn).approve(permit2, leg.amountIn);
             IPermit2(permit2).approve(leg.tokenIn, router, uint160(leg.amountIn), uint48(block.timestamp + 60));
             bytes[] memory params = new bytes[](3);

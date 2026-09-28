@@ -51,7 +51,6 @@ output floors, rollback and allowance cleanup. Keep failing setup separate from 
 No funded live executor, wallet transfer, global execution enablement or production/main change is
 part of this implementation. Preserve the running observer and unrelated staging features.
 
-
 ## Release candidate verification and rollout boundary
 
 The automatic-sizing and SwapVM update is committed on `feat/rebalancer-native-swapvm` in all

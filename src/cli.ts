@@ -1,3 +1,5 @@
+import { runtimeScope, assertPendingScope } from "./runtime-scope.js";
+import { reviewEconomicWindow } from "./economic-review.js";
 import { RuntimeControls } from "./runtime-controls.js";
 import { runReactive } from "./reactive-runner.js";
 import { loadRuntimeSecrets } from "./runtime-secrets.js";
@@ -29,11 +31,11 @@ const { values, positionals } = parseArgs({
     registry: { type: "string", default: "config/chains.json" },
   },
 });
-const chains = loadChains(values.registry);
+const registeredChains = loadChains(values.registry);
 const command = positionals[0] ?? "scan";
 if (command === "doctor") {
   let failures = 0;
-  const selected = chains.filter(
+  const selected = registeredChains.filter(
     (c) => !values.chain || String(c.chainId) === values.chain,
   );
   if (selected.length === 0) throw new Error("Unknown chain selection");
@@ -116,7 +118,11 @@ if (command === "doctor") {
 } else {
   if (command !== "scan" && command !== "run")
     throw new Error("Use doctor, scan, or run");
-  const settings = loadSettings(values.config);
+  const { chains, settings } = runtimeScope(
+    registeredChains,
+    loadSettings(values.config),
+    values.chain,
+  );
   const headers: Record<string, string> = {
     "X-Network-Mode": settings.networkMode,
   };
@@ -137,6 +143,8 @@ if (command === "doctor") {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   try {
+    const journal = new Journal("runtime/journal.json");
+    assertPendingScope(journal, chains, settings);
     history = new HistoryStore("runtime/history.sqlite");
     if (settings.discovery.enabled)
       catalog = new MarketCatalog(
@@ -163,7 +171,7 @@ if (command === "doctor") {
       chains,
       settings,
       new AquaClient(settings.apiUrl, headers),
-      new Journal("runtime/journal.json"),
+      journal,
       history,
       catalog,
       swapVMCatalog,
@@ -178,6 +186,14 @@ if (command === "doctor") {
         swapVMCatalog,
         controls,
         onPolicyChanged: (id) => runner.marketChanged(id),
+        economicReview: (input, actor) =>
+          reviewEconomicWindow(
+            history!,
+            settings.networkMode,
+            input,
+            actor,
+            (chainId) => runner.client(chainId),
+          ),
         hostHealth: () => {
           const path = process.env.REBALANCER_HOST_HEALTH_FILE;
           if (!path)

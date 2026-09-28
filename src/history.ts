@@ -1,3 +1,10 @@
+import {
+  feeValuationSchema,
+  summarizeEconomics,
+  economicsReviewSchema,
+  type EconomicsSnapshot,
+  type EconomicPauseReason,
+} from "./economics.js";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { mkdirSync, chmodSync } from "node:fs";
 import { dirname } from "node:path";
@@ -44,6 +51,8 @@ const swapVMReceiptSchema = z.object({
   logIndex: z.number().int().nonnegative(),
 });
 export const receiptSchema = z.object({
+  feeValuation: feeValuationSchema.nullable().optional(),
+  feeIssue: z.string().max(160).nullable().optional(),
   swapVM: swapVMReceiptSchema.optional(),
   blockNumber: uint,
   blockHash: hash,
@@ -71,6 +80,24 @@ export const receiptSchema = z.object({
 export const executionSchema = z
   .object({
     version: z.literal(1),
+    feePolicy: z
+      .object({
+        feeModel: z.enum(["op-stack", "gas-limit", "unsupported"]),
+        nativeCurrency: z
+          .object({
+            symbol: z.string().min(1).max(32),
+            decimals: z.number().int().min(0).max(36),
+          })
+          .nullable(),
+        nativeEquivalent: z
+          .object({ token: addr, decimals: z.number().int().min(0).max(36) })
+          .nullable(),
+        wrappedNative: addr,
+        gasConversionFee: z.number().int().positive().max(1000000),
+        venues: z.array(z.object({ factory: addr, quoter: addr })).max(16),
+      })
+      .strict()
+      .optional(),
     network: z.enum(["mainnet", "fork"]),
     chainId: z.number().int().positive().safe(),
     transactionHash: hash,
@@ -153,7 +180,21 @@ export class HistoryStore {
       ) STRICT;
       CREATE INDEX IF NOT EXISTS executions_chain ON executions(network,chain_id,seq DESC);
       CREATE INDEX IF NOT EXISTS executions_status ON executions(network,status,seq DESC);
-      CREATE INDEX IF NOT EXISTS executions_pair ON executions(network,pool_id,seq DESC);`);
+      CREATE INDEX IF NOT EXISTS executions_pair ON executions(network,pool_id,seq DESC);
+      CREATE TABLE IF NOT EXISTS economic_settlements (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, chain_id INTEGER NOT NULL, transaction_hash TEXT NOT NULL,
+        UNIQUE(network,chain_id,transaction_hash)
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS economic_controls (
+        network TEXT PRIMARY KEY, version INTEGER NOT NULL, reviewed_seq INTEGER NOT NULL DEFAULT 0,
+        latched INTEGER NOT NULL DEFAULT 0, reason TEXT, reviewed_at TEXT, reviewed_by TEXT, review_reason TEXT
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS economic_reviews (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, through_seq INTEGER NOT NULL,
+        actor TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL, previous_result TEXT NOT NULL
+      ) STRICT;
+      INSERT OR IGNORE INTO economic_settlements(network,chain_id,transaction_hash)
+        SELECT network,chain_id,transaction_hash FROM executions WHERE status!='pending' ORDER BY seq;`);
   }
   close(): void {
     this.db.close();
@@ -182,22 +223,25 @@ export class HistoryStore {
     }
     if (r.status !== "pending")
       throw new Error("New history must be prepared before broadcast");
-    this.db
-      .prepare(
-        `INSERT INTO executions(network,chain_id,transaction_hash,token_in,token_out,pool_id,status,prepared_at,payload)
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO executions(network,chain_id,transaction_hash,token_in,token_out,pool_id,status,prepared_at,payload)
       VALUES(?,?,?,?,?,?,?,?,?)`,
-      )
-      .run(
-        r.network,
-        r.chainId,
-        r.transactionHash,
-        r.tokenIn,
-        r.tokenOut,
-        r.poolId ?? r.swapVM!.stableStrategyId,
-        r.status,
-        r.preparedAt,
-        JSON.stringify(r),
-      );
+        )
+        .run(
+          r.network,
+          r.chainId,
+          r.transactionHash,
+          r.tokenIn,
+          r.tokenOut,
+          r.poolId ?? r.swapVM!.stableStrategyId,
+          r.status,
+          r.preparedAt,
+          JSON.stringify(r),
+        );
+      this.touchEconomics(r.network);
+    });
   }
   acknowledgeBroadcast(network: string, chainId: number, tx: string): void {
     const r = this.get(network, chainId, tx);
@@ -223,18 +267,200 @@ export class HistoryStore {
     this.write(executionSchema.parse({ ...r, status, receipt }));
   }
   private write(r: ExecutionRecord): void {
-    const result = this.db
+    const current = this.get(r.network, r.chainId, r.transactionHash);
+    if (current && JSON.stringify(current) === JSON.stringify(r)) return;
+    this.transaction(() => {
+      const result = this.db
+        .prepare(
+          "UPDATE executions SET status=?,payload=? WHERE network=? AND chain_id=? AND transaction_hash=?",
+        )
+        .run(
+          r.status,
+          JSON.stringify(r),
+          r.network,
+          r.chainId,
+          r.transactionHash,
+        );
+      if (result.changes !== 1)
+        throw new Error("History update did not persist");
+      this.touchEconomics(r.network);
+      if (r.status !== "pending") {
+        this.db
+          .prepare(
+            "INSERT OR IGNORE INTO economic_settlements(network,chain_id,transaction_hash) VALUES(?,?,?)",
+          )
+          .run(r.network, r.chainId, r.transactionHash);
+        const summary = this.economics(r.network);
+        const reason = summary.window.some((g) => g.unknownCost > 0)
+          ? "cost_unavailable"
+          : summary.window.some(
+                (g) => g.netResult !== null && BigInt(g.netResult) < 0n,
+              )
+            ? "net_loss"
+            : null;
+        if (reason)
+          this.db
+            .prepare(
+              "UPDATE economic_controls SET latched=1,reason=COALESCE(reason,?) WHERE network=?",
+            )
+            .run(reason, r.network);
+      }
+    });
+  }
+  private transaction<T>(operation: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = operation();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  private touchEconomics(network: string): void {
+    this.db
       .prepare(
-        "UPDATE executions SET status=?, payload=? WHERE network=? AND chain_id=? AND transaction_hash=?",
+        "INSERT INTO economic_controls(network,version) VALUES(?,1) ON CONFLICT(network) DO UPDATE SET version=version+1",
       )
-      .run(
-        r.status,
-        JSON.stringify(r),
-        r.network,
-        r.chainId,
-        r.transactionHash,
-      );
-    if (result.changes !== 1) throw new Error("History update did not persist");
+      .run(network);
+  }
+  /** Settlement order, not preparation time, defines the review window. Reads never mutate controls. */
+  *economicRecords(network: string, after = 0): Generator<ExecutionRecord> {
+    z.enum(["mainnet", "fork"]).parse(network);
+    for (const row of this.db
+      .prepare(
+        `SELECT e.payload FROM executions e JOIN economic_settlements s
+      ON e.network=s.network AND e.chain_id=s.chain_id AND e.transaction_hash=s.transaction_hash
+      WHERE s.network=? AND s.seq>? ORDER BY s.seq`,
+      )
+      .iterate(network, after)) {
+      yield executionSchema.parse(JSON.parse(String(row.payload)));
+    }
+  }
+  economics(rawNetwork: string): EconomicsSnapshot {
+    const network = z.enum(["mainnet", "fork"]).parse(rawNetwork);
+    const control = this.db
+      .prepare("SELECT * FROM economic_controls WHERE network=?")
+      .get(network);
+    const reviewedThrough = Number(control?.reviewed_seq ?? 0);
+    const totals = summarizeEconomics(this.economicRecords(network));
+    const window = summarizeEconomics(
+      this.economicRecords(network, reviewedThrough),
+    );
+    const inferred = window.some((g) => g.unknownCost > 0)
+      ? "cost_unavailable"
+      : window.some((g) => g.netResult !== null && BigInt(g.netResult) < 0n)
+        ? "net_loss"
+        : null;
+    const reason = (control?.reason ?? inferred) as EconomicPauseReason | null;
+    const audit = this.db
+      .prepare(
+        "SELECT * FROM economic_reviews WHERE network=? ORDER BY seq DESC LIMIT 20",
+      )
+      .all(network)
+      .map((r) => ({
+        at: String(r.at),
+        actor: String(r.actor),
+        reason: String(r.reason),
+        throughSettlement: Number(r.through_seq),
+        previousResult: JSON.parse(String(r.previous_result)) as unknown,
+      }));
+    return {
+      version: Number(control?.version ?? 0),
+      network,
+      reviewedThrough,
+      throughSettlement: Number(
+        this.db
+          .prepare(
+            "SELECT MAX(seq) AS n FROM economic_settlements WHERE network=?",
+          )
+          .get(network)?.n ?? 0,
+      ),
+      blocked: control?.latched === 1 || inferred !== null,
+      reason,
+      pending: Number(
+        this.db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM executions WHERE network=? AND status='pending'",
+          )
+          .get(network)?.n ?? 0,
+      ),
+      totals,
+      window,
+      lastReview: control?.reviewed_at
+        ? {
+            at: String(control.reviewed_at),
+            actor: String(control.reviewed_by),
+            reason: String(control.review_reason),
+          }
+        : null,
+      audit,
+      valuationBasis:
+        "actual-native-fees-and-receipt-block-token-replacement-cost",
+    };
+  }
+  latchEconomics(network: string, reason: EconomicPauseReason): void {
+    z.enum(["mainnet", "fork"]).parse(network);
+    const current = this.db
+      .prepare("SELECT latched,reason FROM economic_controls WHERE network=?")
+      .get(network);
+    if (current?.latched === 1 && current.reason === reason) return;
+    this.transaction(() => {
+      this.touchEconomics(network);
+      this.db
+        .prepare(
+          "UPDATE economic_controls SET latched=1,reason=? WHERE network=?",
+        )
+        .run(reason, network);
+    });
+  }
+  /** Called only by the protected review path after fresh RPC canonicality checks. Never enables execution. */
+  reviewEconomics(
+    network: string,
+    input: unknown,
+    actor: string,
+  ): EconomicsSnapshot {
+    const change = economicsReviewSchema.parse(input);
+    z.string().trim().min(1).max(120).parse(actor);
+    return this.transaction(() => {
+      const before = this.economics(network);
+      if (
+        before.version !== change.expectedVersion ||
+        before.throughSettlement !== change.throughSettlement
+      )
+        throw Error(
+          "Economics review version conflict; refresh before acknowledging",
+        );
+      if (before.pending > 0 || before.window.some((g) => g.unknownCost > 0))
+        throw Error(
+          "Pending transactions or unavailable fees must be reconciled before review",
+        );
+      const at = new Date().toISOString();
+      this.touchEconomics(network);
+      this.db
+        .prepare(
+          "UPDATE economic_controls SET reviewed_seq=?,latched=0,reason=NULL,reviewed_at=?,reviewed_by=?,review_reason=? WHERE network=?",
+        )
+        .run(before.throughSettlement, at, actor, change.reason, network);
+      this.db
+        .prepare(
+          "INSERT INTO economic_reviews(network,through_seq,actor,reason,at,previous_result) VALUES(?,?,?,?,?,?)",
+        )
+        .run(
+          network,
+          before.throughSettlement,
+          actor,
+          change.reason,
+          at,
+          JSON.stringify({
+            reason: before.reason,
+            window: before.window,
+            totals: before.totals,
+          }),
+        );
+      return this.economics(network);
+    });
   }
   list(input: HistoryQuery): HistoryPage {
     const q = historyQuerySchema.parse(input);

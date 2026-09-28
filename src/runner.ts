@@ -1,3 +1,4 @@
+import { assertEconomicExecution } from "./economic-gate.js";
 import type { RuntimeControls } from "./runtime-controls.js";
 import {
   ReadyOpportunityQueue,
@@ -110,6 +111,7 @@ export class Runner {
       submitted: "Waiting for receipt",
       pending_transaction: "Waiting for receipt",
       operator_paused: "Paused by operator",
+      economic_paused: "Paused for economic review",
       chain_error: "Needs attention",
       obsolete_scan_discarded: "Refreshing changed state",
       scan_complete: "Waiting for a new block",
@@ -129,6 +131,7 @@ export class Runner {
       "opportunity",
       "submitted",
       "operator_paused",
+      "economic_paused",
       "chain_error",
       "obsolete_scan_discarded",
       "sizing_rejected",
@@ -225,13 +228,22 @@ export class Runner {
   }
   private swapVMMarkets() {
     return (
-      this.swapVMCatalog?.list().markets.filter((m) => m.readyToQuote) ?? []
+      this.swapVMCatalog
+        ?.list()
+        .markets.filter(
+          (m) =>
+            m.readyToQuote &&
+            this.chains.some((c) => c.chainId === m.market.chainId),
+        ) ?? []
     );
   }
   private markets() {
-    return this.settings.discovery.enabled
+    const markets = this.settings.discovery.enabled
       ? this.catalog!.activeMarkets()
       : this.settings.markets;
+    return markets.filter((m) =>
+      this.chains.some((c) => c.chainId === m.chainId),
+    );
   }
   private assertMarketApproval(market: Settings["markets"][number]) {
     if (!this.settings.discovery.enabled) return;
@@ -261,6 +273,7 @@ export class Runner {
       metrics: { ...this.metrics },
       scheduling: this.schedulingStatus(),
       operatingControl: this.controls?.read() ?? null,
+      economics: this.history?.economics(this.settings.networkMode) ?? null,
       recentActivity: [...this.activity].reverse(),
       searchQueue: this.aqua.searchStatus(),
       chains: this.chains.map((chain) => ({
@@ -385,6 +398,15 @@ export class Runner {
       this.event("operator_paused", { chainId });
       return;
     }
+    if (this.history?.economics(this.settings.networkMode).blocked) {
+      this.event("economic_paused", {
+        chainId,
+        reason: this.history.economics(this.settings.networkMode).reason,
+      });
+      return;
+    }
+    if (this.settings.mode === "execute")
+      assertEconomicExecution(this.history, this.settings.networkMode);
     check();
     if (
       !this.markets().some((m) => m.chainId === chainId) &&

@@ -52,3 +52,11 @@ historical replay correctly failed in fixture setup. Keep those failed reports, 
 rerun; do not relabel unavailable historical state as a successful test. Fresh Base discovery also
 needed the public read endpoint `https://base-rpc.publicnode.com` after the default endpoint rejected
 requests. An archive-capable production/test provider is required for dependable historical replay.
+
+## Patched executor versus pinned legacy fixture compiler
+
+The 0.8.37 executor initially could not share a compilation unit with the test-vendored Aqua0 contracts pinned to 0.8.34. The vendor source was not relaxed or edited. The legacy fixture now calls a generated ABI interface and deploys the separately built 0.8.37 executor artifact. Both Arbitrum route orders and full rollback pass against actual Uniswap and Sushi infrastructure. The generated boundary is checked during contract verification.
+
+## Admin surface declaration and economics
+
+The full backend suite caught the newly mounted economic-review route missing from the explicit audited admin path list. The path was added, and all private-authentication/public-schema surface tests passed. A baseline archive initially lacked the Ponder package dependency symlink; after sharing the same complete dependency tree, only the same five existing durability/mock failures remained in both source revisions.
