@@ -1,6 +1,20 @@
 # Arbitrum readiness, LP wallets and economic review
 
-## Release boundary
+## Deployed release, 2026-09-28
+
+The authoritative deployment and verification record is `evidence/releases/20260928-readiness/release.json`. It supersedes the candidate deployment status below, while preserving those earlier test qualifications.
+
+Backend PR598 is merged into staging at `a9d1e4ea93bda37638b8bba11f32efc9652bc2fa`, with Railway deployment `6d352914-f339-4cd3-b757-d8ae2c9ef3de` successful. Frontend PR607 and the small admin-shell follow-up PR608 are merged into staging at `06ecf1233dfab9e46da64119bdca92c772212ca0`; Railway deployment `0a55f219-4b21-4c23-9b3a-5993965c12a4` is successful. All checks on those PR heads passed. Both merges used normal branch protections and exact source-head checks.
+
+The AWS observer remains on worker source `2a0db3043f2ee26f025e2c23105565f84735003a`, image `sha256:53e88c7854085c251e47102947ad3c3b37ba8dd618dce89be51f7994bf7f8172`. Runtime work is restricted to Arbitrum (42161), using the existing free RPC configuration. The fresh protected read at 01:56:10 UTC confirmed observe mode, zero configured markets, execution disabled and zero confirmed worker executions. Settings, credentials, approvals, operator pauses and the pending journal were preserved by the observer rollout. This documentation update does not change its image or merge worker PR3 to main.
+
+The live protected admin pages `/?section=market-rebalancer` and `/?section=rebalancer-lps` passed at 1440- and 390-pixel widths. The replay waited for completed V4/SwapVM catalogs and successful authenticated read-only runtime refreshes. Anonymous access returned 401; there were no browser runtime errors, HTTP errors or horizontal overflow. No live operating control was clicked. The LP view defaults to Arbitrum and correctly reports no executions rather than inventing LP addresses. Older other-chain discovery rows remain in the catalog, labelled stale; they are not active runtime chains.
+
+The full frontend suite passed 6,228 tests with the same 50 existing skips, and full lint and typechecking passed. Two real follow-up findings were retained: cold transformation of lazy strategy views was moved outside timed routing assertions without replacing the views, and a hidden public onboarding tour was excluded from the private admin host so it no longer requested the public chain catalog there. The first PR608 CI attempt separately timed out in an unchanged Solana explorer assertion. Its independent 55-test replay passed, and one unchanged-source CI retry passed the complete tests and build. No assertions, timeout limits or skips were weakened. Original failed runs and the initial live 404 evidence are retained with hashes in the release record.
+
+The live Arbitrum catalog contained three V4 pairs (WETH/USDC, USDC/DAI and MYRC/USDC) and eleven SwapVM strategies at the recorded read. All were unapproved. Discovery is not proof of available LP backing or a profitable executable round trip. Starting a pilot still requires an owner-selected market and capital/gas limits, reviewed executor/operator permissions and funding, current full-transaction checks and separate execution enablement. No funding, public-chain transaction, price-policy value change, pair approval or live activation occurred in this continuation. The production-maker SwapVM reverse-order issue and hackathon-only 90% profit distribution remain separate unresolved work.
+
+## Historical candidate release boundary
 
 This is the 2026-09-28 candidate. Source implementation and local verification are complete for the LP tab, realized-fee reporting, loss pause, explicit review and single-chain selection. Staging deployment is a separate next gate and is not implied by these tests. No transaction was sent to a public chain, no executor was funded or deployed, no pair approval was added, and no live price-guard value was changed during this work.
 
