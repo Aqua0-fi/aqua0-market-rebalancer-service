@@ -39,6 +39,7 @@ export function createNativeFeeValuer(
   wrappedNative: Address,
   baseToken: Address,
   block: { number: bigint; hash: Hex },
+  preferredPool?: Address,
 ): (nativeCost: bigint) => Promise<NativeFeeValue> {
   if (!chain.nativeEquivalent)
     throw new Error(
@@ -80,6 +81,58 @@ export function createNativeFeeValuer(
   };
 
   const discover = async (): Promise<ConversionPool[]> => {
+    // A route involving the native equivalent already names a possible conversion pool.
+    // Verify every identity at this block; reuse only those identities during refinement.
+    if (preferredPool) {
+      const read = (functionName: "factory" | "token0" | "token1" | "fee") =>
+        client.readContract({
+          address: preferredPool,
+          abi: identityAbi,
+          functionName,
+          blockNumber: block.number,
+        });
+      const [factory, token0, token1, fee] = await Promise.all([
+        read("factory"),
+        read("token0"),
+        read("token1"),
+        read("fee"),
+      ]);
+      const venue = chain.venues.find(
+        (v) =>
+          same(v.factory, factory as Address) && v.fees.includes(fee as number),
+      );
+      if (
+        !venue ||
+        ![token0, token1].some((t) => same(t as Address, baseToken)) ||
+        ![token0, token1].some((t) => same(t as Address, wrappedNative))
+      )
+        throw new Error(
+          "Preferred fee conversion pool is not a verified reviewed pair",
+        );
+      const [quoterFactory, actualPool] = await Promise.all([
+        client.readContract({
+          address: venue.quoter,
+          abi: identityAbi,
+          functionName: "factory",
+          blockNumber: block.number,
+        }),
+        client.readContract({
+          address: venue.factory,
+          abi: identityAbi,
+          functionName: "getPool",
+          args: [baseToken, wrappedNative, fee as number],
+          blockNumber: block.number,
+        }),
+      ]);
+      if (
+        !same(quoterFactory, venue.factory) ||
+        !same(actualPool, preferredPool)
+      )
+        throw new Error("Preferred fee conversion pool identity mismatch");
+      return [
+        { pool: preferredPool, quoter: venue.quoter, fee: fee as number },
+      ];
+    }
     const found: ConversionPool[] = [];
     await forEachConcurrent(chain.venues, 2, async (venue) => {
       try {

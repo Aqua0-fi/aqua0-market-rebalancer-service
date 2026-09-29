@@ -111,7 +111,7 @@ export async function findCandidates(params: {
   );
 }
 export function assertFresh(
-  candidate: Candidate,
+  candidate: Pick<Candidate, "quotedAt" | "blockNumber">,
   head: bigint,
   now: number,
   maxAgeMs: number,

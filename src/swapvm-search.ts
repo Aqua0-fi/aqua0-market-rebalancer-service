@@ -1,3 +1,5 @@
+import { ObsoleteScan } from "./head-scheduler.js";
+import { safeError } from "./diagnostics.js";
 import { forEachConcurrent } from "./opportunity-queue.js";
 import { erc20Abi, type Address, type PublicClient } from "viem";
 import { executorAbi } from "./abi.js";
@@ -130,6 +132,21 @@ export async function collectSwapVMChoices(
             });
             for (const candidate of result.candidates) {
               if (context.signal?.aborted) return;
+              assertFresh(
+                candidate,
+                await client.getBlockNumber(),
+                Date.now(),
+                settings.maxQuoteAgeMs,
+                settings.maxBlockLag,
+              );
+              if (
+                !candidate.quoteBlockHash ||
+                (await client.getBlock({ blockNumber: candidate.blockNumber }))
+                  .hash !== candidate.quoteBlockHash
+              )
+                throw new Error("SwapVM quote block reorganized");
+              context.check?.();
+              catalog.assertApproved(market, policy);
               const choice: SwapVMChoice = {
                 kind: "aqua",
                 candidate,
@@ -142,12 +159,14 @@ export async function collectSwapVMChoices(
               choices.push(choice);
               context.onCandidate?.(choice);
             }
-          } catch {
+          } catch (error) {
             if (context.signal?.aborted) return;
+            if (error instanceof ObsoleteScan) throw error;
             context.onEvent("swapvm_sizing_rejected", {
               chainId: chain.chainId,
               strategyId: market.stableStrategyId,
               externalPool: external.address,
+              reason: safeError(error),
             });
           }
         },
@@ -192,7 +211,8 @@ export async function refreshSwapVMChoice(
     limit[0],
     (1n << 128n) - 1n,
   ].reduce((a, b) => (a < b ? a : b));
-  if (cap <= 0n) return null;
+  const selectedAmount = choice.candidate.trade.first.amountIn;
+  if (selectedAmount <= 0n || selectedAmount > cap) return null;
   const result = await aqua.optimizeSwapVM({
     chain,
     market: choice.market,
@@ -201,15 +221,21 @@ export async function refreshSwapVMChoice(
     caller: execution.executor,
     network: settings.networkMode,
     maxInput: cap,
+    fixedAmount: selectedAmount,
     executionPriority: true,
     gasBudget: 0n,
     slippageBps: settings.slippageBps,
     signal: context.signal,
-    // Recompute the size too: shared backing and the external market may both have moved.
+    // Refresh the selected amount once. A changed cap/failed fill returns to discovery;
+    // repeating an entire adaptive search here races the same freshness window again.
   });
-  context.check?.();
-  const candidate = result.candidates[0];
-  if (!candidate) return null;
+  const candidate = result.candidates.find(
+    (c) => c.aquaFirst === choice.candidate.aquaFirst,
+  );
+  if (!candidate) {
+    context.check?.();
+    return null;
+  }
   assertFresh(
     candidate,
     await client.getBlockNumber(),
@@ -224,6 +250,7 @@ export async function refreshSwapVMChoice(
     throw new Error("Refreshed SwapVM quote block reorganized");
   if (candidate.quoteBlockHash)
     context.bindSnapshot?.(candidate.blockNumber, candidate.quoteBlockHash);
+  context.check?.();
   catalog.assertApproved(choice.market, choice.policy);
   return candidate;
 }

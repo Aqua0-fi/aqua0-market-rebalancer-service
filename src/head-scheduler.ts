@@ -9,12 +9,16 @@ export interface ScanTask {
   readonly signal: AbortSignal;
   /** Call again before reserving, signing and broadcasting. Does not erase a pending transaction. */
   assertCurrent(): void;
+  /** A read/requote may outlive its prior quote, but never its task, permission epoch or stop signal. */
+  assertActive(): void;
   /** Any newer chain state invalidates queued prices, including shared-vault and external-pool changes. */
   acceptsSnapshot(number: bigint, hash: `0x${string}`): boolean;
   queueRevision(): string;
   /** A bounded provisional quote may begin fresh checking; it never authorizes transmission. */
   adoptQuote(number: bigint, hash: `0x${string}`): void;
   bindSnapshot(number: bigint, hash: `0x${string}`): void;
+  /** Only for a completed exact-call proof: retain the configured block bound without requiring a stationary head. */
+  bindExecutionSnapshot(number: bigint, hash: `0x${string}`): void;
 }
 interface Slot {
   head: ObservedHead;
@@ -149,19 +153,30 @@ export class LatestHeadScheduler {
       const startDelay = Math.max(0, startedAt - slot.observedAt);
       let skipped = false;
       let reference = head;
-      const accepts = (number: bigint, hash: `0x${string}`) =>
+      const active = () =>
         !this.stopped &&
         !controller.signal.aborted &&
         slot.epoch === epoch &&
+        this.now() - startedAt < this.options.maxTaskMs;
+      const assertActive = () => {
+        if (!active())
+          throw new ObsoleteScan(
+            "Scan stopped, invalidated or time budget expired",
+          );
+      };
+      const accepts = (number: bigint, hash: `0x${string}`) =>
+        active() &&
         (number > slot.head.number ||
           (number === slot.head.number && hash === slot.head.hash));
       const task: ScanTask = {
         head,
         signal: controller.signal,
+        assertActive,
         acceptsSnapshot: accepts,
         queueRevision: () =>
           `${slot.epoch}:${slot.head.number}:${slot.head.hash}`,
         adoptQuote: (number, hash) => {
+          assertActive();
           if (
             this.stopped ||
             controller.signal.aborted ||
@@ -176,13 +191,27 @@ export class LatestHeadScheduler {
           reference = { number, hash, parentHash: head.parentHash };
         },
         bindSnapshot: (number, hash) => {
+          assertActive();
           if (!accepts(number, hash))
             throw new ObsoleteScan(
               "Shared chain state changed before the fresh quote was ready",
             );
           reference = { number, hash, parentHash: head.parentHash };
         },
+        bindExecutionSnapshot: (number, hash) => {
+          assertActive();
+          if (
+            (number < slot.head.number &&
+              slot.head.number - number > BigInt(this.options.maxBlockLag)) ||
+            (number === slot.head.number && hash !== slot.head.hash)
+          )
+            throw new ObsoleteScan(
+              "Execution simulation is outside current-state bounds",
+            );
+          reference = { number, hash, parentHash: head.parentHash };
+        },
         assertCurrent: () => {
+          assertActive();
           if (
             this.stopped ||
             controller.signal.aborted ||

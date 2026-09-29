@@ -331,3 +331,72 @@ test("a refreshed estimate does not preserve an obsolete fee-inclusive profit fl
   assert.equal(c.trade.minProfit, 331n);
   assert.equal(c.netProfit, 1769n);
 });
+
+test("freshness follows the exact simulated transaction, not the superseded search quote", async () => {
+  const { assertFeeEstimateFresh } = await import("../src/live-fees.js");
+  const h = harness(),
+    c = candidate();
+  const proof = await finalizeCandidateFees(
+    h.client,
+    chain,
+    policy,
+    c,
+    block,
+    0,
+    1n,
+    100n,
+  );
+  c.blockNumber = 1n;
+  c.quotedAt = 0;
+  assert.doesNotThrow(() =>
+    assertFeeEstimateFresh(
+      proof,
+      c,
+      { number: 107n, hash },
+      Date.now(),
+      10000,
+      8,
+    ),
+  );
+  assert.throws(
+    () =>
+      assertFeeEstimateFresh(
+        proof,
+        c,
+        { number: 109n, hash },
+        Date.now(),
+        10000,
+        8,
+      ),
+    /stale/i,
+  );
+  assert.throws(
+    () =>
+      assertFeeEstimateFresh(
+        proof,
+        c,
+        block,
+        proof.observedAt + 10001,
+        10000,
+        8,
+      ),
+    /stale/i,
+  );
+  assert.throws(
+    () =>
+      assertFeeEstimateFresh(
+        proof,
+        c,
+        { ...block, hash: `0x${"cc".repeat(32)}` },
+        Date.now(),
+        10000,
+        8,
+      ),
+    /reorg/i,
+  );
+  c.trade.second.minOut += 1n;
+  assert.throws(
+    () => assertFeeEstimateFresh(proof, c, block, Date.now(), 10000, 8),
+    /changed/i,
+  );
+});

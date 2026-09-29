@@ -60,3 +60,34 @@ The 0.8.37 executor initially could not share a compilation unit with the test-v
 ## Admin surface declaration and economics
 
 The full backend suite caught the newly mounted economic-review route missing from the explicit audited admin path list. The path was added, and all private-authentication/public-schema surface tests passed. A baseline archive initially lacked the Ponder package dependency symlink; after sharing the same complete dependency tree, only the same five existing durability/mock failures remained in both source revisions.
+
+## Arbitrum activation exposed quote-reference starvation
+
+The owner completed the pilot setup on September 29. A read-only check at 04:19:24 UTC found the
+executor unpaused with exactly 5 native USDC, one approved SwapVM strategy and execute mode, but
+79 discarded passes and zero completed passes. Sixteen candidate events were present while the
+headline candidate counter remained zero. This was not evidence that no opportunity existed.
+
+The read/requote lifecycle was checking the previous reference block before the returned quote
+could replace it. A deterministic reproduction started at block 100, returned a quote at 111 with
+head 112, and still refused on the original anchor despite the unchanged eight-block bound.
+Preparatory reads now use an explicit task-liveness check. The actual quote is checked for age,
+canonical block and approvals before adoption. Task expiry, revocation, reorg and stop cannot be
+cleared by adopting a new quote. The chosen SwapVM amount/direction is refreshed once instead of
+running another full adaptive search. Insufficient current inventory returns to discovery.
+
+The final exact-call simulation now supplies its own freshness evidence. Its calldata hash is checked
+before and after signing, and the same configured block/time bounds apply to that proof. This is a
+bounded proof, not a guarantee that no later block or inclusion-time state change can occur. Pending
+nonces, economic controls, full-call execution and onchain minimum-profit checks remain mandatory.
+
+The route's verified native/base-token V3 pool can value gas directly, with same-block factory,
+quoter, token, fee and factory-lookup validation. Every changed native cost is still quoted anew.
+The earlier all-tier search remains for routes without a matching conversion pair; no zero-fee
+fallback or assumed token price was added. Local read-only measurements dropped fee preparation
+from about 27 seconds to about 9 seconds; host-side timing must be checked before release claims.
+
+Candidate counts advance when a validated candidate is found, including candidates later discarded.
+Unavailable SwapVM searches count as failures; they do not emit a successful empty pass. Diagnostic
+reasons are retained with authenticated URLs redacted. No repair code has been activated on the live
+funded worker merely by these source changes.

@@ -5,9 +5,9 @@ import {
   type Hex,
   type PublicClient,
 } from "viem";
-import type { ChainConfig } from "./config.js";
+import { same, type ChainConfig } from "./config.js";
 import { executorAbi } from "./abi.js";
-import { ceilDiv, type Candidate } from "./strategy.js";
+import { assertFresh, ceilDiv, type Candidate } from "./strategy.js";
 import { readAdditionalNetworkFees } from "./fees.js";
 import { createNativeFeeValuer } from "./gas-valuation.js";
 
@@ -38,6 +38,7 @@ export interface LiveFeePolicy {
   liveFeeBufferBps?: number | undefined;
 }
 export interface LiveFeeEstimate {
+  observedAt: number;
   blockNumber: bigint;
   blockHash: Hex;
   gas: bigint;
@@ -67,6 +68,7 @@ export async function finalizeCandidateFees(
   onchainGasPriceCap: bigint,
 ): Promise<LiveFeeEstimate> {
   delete candidate.feeEstimate;
+  const observedAt = Date.now();
   if ((await client.getChainId()) !== chain.chainId)
     throw new Error("Fee RPC chain mismatch");
   const buffer = policy.liveFeeBufferBps ?? DEFAULT_LIVE_FEE_BUFFER_BPS;
@@ -95,6 +97,14 @@ export async function finalizeCandidateFees(
     policy.wrappedNative,
     trade.first.tokenIn,
     block,
+    !same(trade.first.tokenIn, policy.wrappedNative) &&
+      same(trade.first.tokenOut, policy.wrappedNative)
+      ? trade.first.venue === 1
+        ? trade.first.target
+        : trade.second.venue === 1
+          ? trade.second.target
+          : undefined
+      : undefined,
   );
   for (let pass = 0; pass < MAX_FEE_REFINEMENT_PASSES; pass++) {
     const data = encodeFunctionData({
@@ -154,6 +164,7 @@ export async function finalizeCandidateFees(
     )
       throw new Error("Fee simulation block reorganized");
     const estimate: LiveFeeEstimate = {
+      observedAt,
       blockNumber: block.number,
       blockHash: block.hash,
       gas,
@@ -177,4 +188,31 @@ export async function finalizeCandidateFees(
   throw new Error(
     "Transaction fee refinement did not converge; no execution estimate accepted",
   );
+}
+
+/** The exact full-call proof replaces provisional quote freshness, not its calldata or risk limits. */
+export function assertFeeEstimateFresh(
+  estimate: LiveFeeEstimate,
+  candidate: Candidate,
+  head: { number: bigint; hash: Hex },
+  now: number,
+  maxAgeMs: number,
+  maxBlockLag: number,
+): void {
+  assertFresh(
+    { quotedAt: estimate.observedAt, blockNumber: estimate.blockNumber },
+    head.number,
+    now,
+    maxAgeMs,
+    maxBlockLag,
+  );
+  if (head.number === estimate.blockNumber && head.hash !== estimate.blockHash)
+    throw new Error("Execution simulation block reorganized");
+  const data = encodeFunctionData({
+    abi: executorAbi,
+    functionName: "execute",
+    args: [candidate.trade],
+  });
+  if (keccak256(data) !== estimate.calldataHash || estimate.data !== data)
+    throw new Error("Trade changed after its full transaction fee simulation");
 }

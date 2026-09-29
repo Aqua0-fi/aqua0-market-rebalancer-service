@@ -124,3 +124,45 @@ test("an unavailable tier can use a genuinely quoted reviewed alternative, never
   assert.equal(result.tokenCost, 25n);
   assert.equal(result.conversionPool, address(500));
 });
+
+test("the route's own verified gas/base pool avoids an unrelated fee-tier discovery on every candidate", async () => {
+  const h = harness();
+  const value = createNativeFeeValuer(
+    h.client,
+    chain,
+    wrapped,
+    base,
+    block,
+    address(100),
+  );
+  const first = await value(1000n);
+  await value(1200n);
+  assert.equal(first.tokenCost, 30n);
+  assert.equal(first.conversionPool, address(100));
+  assert.equal(h.factoryReads(), 1);
+  assert.deepEqual(
+    h.quoted.map((q) => q.fee),
+    [100, 100],
+  );
+  assert.deepEqual(
+    h.quoted.map((q) => q.amount),
+    [1000n, 1200n],
+  );
+});
+
+test("a preferred conversion pool must prove its own factory, tokens, tier and factory lookup", async () => {
+  const h = harness();
+  await assert.rejects(
+    () =>
+      createNativeFeeValuer(
+        h.client,
+        chain,
+        wrapped,
+        base,
+        block,
+        address(3000),
+      )(1000n),
+    /verified|identity|reviewed/i,
+  );
+  assert.equal(h.quoted.length, 0);
+});

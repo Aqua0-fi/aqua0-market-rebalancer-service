@@ -15,7 +15,7 @@ import type { KmsTransport } from "./kms-account.js";
 import { executorAbi } from "./abi.js";
 import { rpcUrl, same, type ChainConfig, type Settings } from "./config.js";
 import { assertFresh, type Candidate } from "./strategy.js";
-import { finalizeCandidateFees } from "./live-fees.js";
+import { finalizeCandidateFees, assertFeeEstimateFresh } from "./live-fees.js";
 import { Journal } from "./state.js";
 import { HistoryStore } from "./history.js";
 import { preparedExecution, executionReceipt } from "./execution-history.js";
@@ -208,7 +208,8 @@ export async function submit(
     onchainGasCap,
   );
   const signingHead = await client.getBlock();
-  checkQuote(signingHead);
+  if (candidate.trade.deadline <= signingHead.timestamp + 5n)
+    throw new Error("Authorization near expiry during fee preparation");
   // A changed state requires a new whole-call estimate, conversion and simulation, not just old math.
   if (signingHead.hash !== head.hash) {
     head = signingHead;
@@ -230,7 +231,14 @@ export async function submit(
       onchainGasCap,
     );
   }
-  checkQuote(await client.getBlock());
+  assertFeeEstimateFresh(
+    fees,
+    candidate,
+    await client.getBlock(),
+    Date.now(),
+    settings.maxQuoteAgeMs,
+    settings.maxBlockLag,
+  );
   if (
     (await client.getTransactionCount({
       address: account.address,
@@ -273,6 +281,25 @@ export async function submit(
     gasPrice,
     nonce,
   });
+  const [broadcastHead, canonicalProof] = await Promise.all([
+    client.getBlock(),
+    client.getBlock({ blockNumber: fees.blockNumber }),
+  ]);
+  assertFeeEstimateFresh(
+    fees,
+    candidate,
+    broadcastHead,
+    Date.now(),
+    settings.maxQuoteAgeMs,
+    settings.maxBlockLag,
+  );
+  if (
+    canonicalProof.hash !== fees.blockHash ||
+    candidate.trade.deadline <= broadcastHead.timestamp + 5n
+  )
+    throw new Error(
+      "Execution proof reorganized or authorization expired during signing",
+    );
   beforeBroadcast?.(simulatedAt);
   assertEconomicExecution(history, settings.networkMode);
   const hash = keccak256(signed);
