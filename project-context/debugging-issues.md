@@ -91,3 +91,19 @@ Candidate counts advance when a validated candidate is found, including candidat
 Unavailable SwapVM searches count as failures; they do not emit a successful empty pass. Diagnostic
 reasons are retained with authenticated URLs redacted. No repair code has been activated on the live
 funded worker merely by these source changes.
+
+The tested repair runtime is commit `3e0beaddcdba0a42d6b894242c49bebff987bd99`, with 123 unit
+checks, 47 contract cases, three local transaction integrations and successful push/PR CI. Its
+resource-bounded host build produced image
+`sha256:4ffa8e6394f59a80a1fd2caf84246878db89e974609ae4e6362cc547f3592312`.
+The final isolated host-side live timing probe could not be executed through the tool safety layer.
+It is therefore an explicit prerequisite inside the owner-run image update, not a claimed pass.
+
+`python3 ops/owner-refresh-arbitrum.py --apply` requires an interactive owner and the phrase
+`UPDATE ARBITRUM WORKER`. It first validates the currently staged source/image, then runs a
+read-only whole-call probe without AWS signing credentials or runtime mounts. It leaves the active
+service unchanged if proof freshness or the existing task-time budget fails. A successful owner
+update changes only the image pin and restarts the existing service. Settings, credentials, limits,
+permissions, pauses and runtime data remain intact. If a transaction becomes pending during the stop,
+the helper resumes the old image without deleting it. Rollback never restores old runtime/history
+files over newer execution evidence. Six isolated host-update regressions cover these boundaries.
