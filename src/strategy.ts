@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { Address, Hex } from "viem";
 import type { SwapVMExecutionContext } from "./swapvm.js";
 import type { Pool } from "./config.js";
+import type { LiveFeeEstimate } from "./live-fees.js";
 export const haircut = (amount: bigint, bps: number): bigint =>
   (amount * BigInt(10000 - bps)) / 10000n;
 export const ceilDiv = (a: bigint, b: bigint): bigint => (a + b - 1n) / b;
@@ -24,6 +25,10 @@ export type Trade = {
   second: Leg;
 };
 export type Candidate = {
+  /** Explicit policy floor, separate from any provisional screening allowance. */
+  minimumNetProfit?: bigint;
+  /** Present only after the exact guarded call has been estimated and simulated. */
+  feeEstimate?: LiveFeeEstimate;
   trade: Trade;
   quotedProfit: bigint;
   netProfit: bigint;
@@ -92,6 +97,7 @@ export async function findCandidates(params: {
           },
           quotedProfit: out2 - amount,
           netProfit: finalFloor - amount - p.gasCost,
+          minimumNetProfit: p.minNetProfit,
           quotedAt,
           blockNumber: p.blockNumber,
           aquaFirst,

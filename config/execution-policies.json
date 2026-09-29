@@ -57,7 +57,8 @@
         ]
       }
     ],
-    "reviewed": true
+    "reviewed": true,
+    "nativeEquivalentSymbol": "weth"
   },
   "43114": {
     "publicRpc": "https://api.avax.network/ext/bc/C/rpc",

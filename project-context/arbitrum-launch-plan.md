@@ -16,3 +16,27 @@ The September 28 readiness release already deployed the LP-wallet tab, receipt f
 ## Acceptance
 
 Never turn a unavailable read into zero gas, a missing LP into a guessed recipient, a static quote into execution proof, or a wallet deposit into permission to enable every market. No total-completion claim without source and execution evidence. No new paid infrastructure or background training is needed.
+
+## Deferred: broader liquidity comparison and guarded execution
+
+Owner-requested follow-up, after the Arbitrum launch: evaluate Tycho and aggregator quote feeds for supported protocols, rather than maintaining isolated price probes for every venue. This is a later task, not part of the current deployment gate.
+
+Start with read-only discovery and block-aligned quote/simulation comparison; measure real protocol/chain coverage, fee treatment, state freshness, authentication and running cost. Tycho provides separate indexing, simulation and execution components; no assumption that one integration supports every protocol or every custom hook. Reference: the official propeller-heads/tycho repository and its simulation/execution documentation.
+
+Only promote a discovered route to execution after an exact adapter/allowlist, independent fork proof, current Aqua0 backing/consent and whole-transaction profit checks. Retain same-chain atomicity, old-inventory isolation, durable nonce/history handling and manual-only LP returns. UniswapX/Fusion indicative intent prices are not silently treated as synchronous contract-call output.
+
+The current MarketRebalancer is not an upgradeable proxy. Expanded execution therefore means a reviewed new executor version and explicit owner-controlled inventory/configuration migration, not mutating this deployed bytecode. Preserve the old version for reconciliation, review any new callback/approval surface, and do not implement an unrestricted arbitrary-call bypass.
+
+## 2026-09-29 measured-fee and owner-command completion
+
+Actual V4 fee/spacing propagation is merged to backend staging through PR603 and browser staging
+through PR613. The deployed resolver now recognizes the real non-default pool keys without weakening
+strategist consent. Classes 1/2 lack consent; approved class 102 separately has no usable LP-preference
+plan. These are not permission to auto-approve or invent liquidity. The first pilot uses the independently
+proven actual-vault SwapVM route instead.
+
+The worker's candidate search is gross-only until the complete transaction is estimated and simulated.
+Its fee floor uses live gas price plus 5%, actual call gas, real network extras and a verified native-asset
+conversion. The source includes a one-command owner setup, private durable intent journal and local-fork
+proofs for both the observed arbitrage and exact-USDC funding/refund. No live setup or trade was executed
+by the agent. Publish and verify the new observe-only image before emitting its owner activation receipt.

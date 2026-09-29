@@ -1,3 +1,10 @@
+# Current owner-run Arbitrum pilot
+
+The final setup entrypoint is `ops/owner-start-arbitrum.py`. With no flag it only previews; with
+`--enable` it requires an interactive owner confirmation. The currently deployed executor is reused.
+See `measured-fees-and-pilot.md` for the exact command, budgets, journal recovery and release gate.
+Do not replay the historical deployment instructions below.
+
 # Arbitrum launch and hackathon LP return
 
 This is an Arbitrum-only first launch, not cross-chain arbitrage. The two trade legs remain one guarded transaction. The live observer is not enabled by these source changes.
@@ -69,3 +76,19 @@ This is the first reviewed showcase batch, not a recurring rewards service. A la
 ## Release boundaries
 
 The earlier LP tab, price controls and economic pause were already deployed in the September 28 readiness release. This launch branch adds physical-capacity bounds, optional return preparation and its UI. Do not report the old expansion checkout as the latest deployed state. Record current PR, CI and Railway revisions after any staging rollout. Leave main, onchain funds and live trading unchanged without their separate owner actions.
+
+## Owner-invoked paused executor deployment
+
+The owner may run `python3 ops/owner-deploy-arbitrum.py` for a fresh read-only preview, or add `--send` from an interactive local terminal to review and authorize one contract creation. The send mode requires typing `DEPLOY 42161`; it cannot run non-interactively. This is an owner action, not an autonomous worker operation.
+
+The helper pins the compiler and creation-code hash, checks the current KMS public key, Arbitrum chain ID, pending nonce, balance and gas estimate, and caps the maximum creation fee at 0.0003 ETH. It sends no native value to the new contract. It deploys paused and adds no operator, token funding, market permission or live worker activation by itself. The separate unsigned setup package remains necessary.
+
+A private, exclusive `runtime/owner-launch/arbitrum-deployment.json` journal is written before signing. The deterministic transaction hash is persisted before transmission. Keep it intact. `--status` checks the recorded hash without signing or retransmission; a pending or interrupted attempt is not a reason to delete the journal. A successful receipt is checked for canonicality, exact runtime code (with explicit immutable getter checks), owner and initial paused state.
+
+The ordinary worker KMS signer remains unable to deploy contracts or send native ETH. The separate owner helper signs only the exact reviewed Arbitrum creation and only once per invocation. Verification used synthetic local keys on a newly spawned, non-forked local EVM; the real command's preview explicitly disables signing.
+
+## Updated Arbitrum production evidence
+
+The owner ran the authenticated read-only capture helper, resolving that earlier tool block without exposing the key. The captured Arbitrum production adapter/vault path passed both direct fills and all six local-fork cases, including atomic round trips, rollback and a manual 90% return to the actual LP source wallet. The profit cases used a large, explicitly synthetic external-pool displacement and are not live opportunity evidence. Reproduce with `PRODUCTION_TEST_DISPLACEMENT_STEPS=24` in addition to the Arbitrum fixture variables above.
+
+A separate fresh public quote probe at unmodified Arbitrum prices found no positive gross result for this one USDC/USDT strategy at 1, 2 and 5 USDC in either route order. It is not an exhaustive market scan. The actual worker must continue refusing losing candidates; deploying the contract cannot create an economic opportunity.

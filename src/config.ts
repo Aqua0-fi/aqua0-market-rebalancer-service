@@ -77,6 +77,7 @@ export type Market = z.infer<typeof marketSchema>;
 const quoteFeeSchema = z
   .object({
     maxGasUnits: positive,
+    liveFeeBufferBps: z.number().int().min(10000).max(20000).optional(),
     maxFeePerGas: positive,
     l1FeeReserveWei: uint,
     wrappedNative: address,
@@ -136,7 +137,9 @@ export const settingsSchema = z.object({
             })
             .optional(),
           allowBroadcast: z.boolean().default(false),
+          externalPools: z.array(address).min(1).max(64).optional(),
           maxGasUnits: positive,
+          liveFeeBufferBps: z.number().int().min(10000).max(20000).optional(),
           maxFeePerGas: positive,
           l1FeeReserveWei: uint,
           maxDailyGasWei: positive,

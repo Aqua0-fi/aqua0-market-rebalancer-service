@@ -250,7 +250,11 @@ contract ProductionAquaAdapterForkTest is Test {
         uint256 finalOut;
         uint256 cap = physicalCapacity(aquaFirst ? vault1 : vault0);
         bool found;
-        for (uint256 attempt; attempt < 12; attempt++) {
+        // Different external pools need different local-only displacement budgets.
+        // This never changes INPUT, actual vault backing or any production permission.
+        uint256 steps = vm.envOr("PRODUCTION_TEST_DISPLACEMENT_STEPS", uint256(12));
+        require(steps > 0 && steps <= 24, "Invalid local displacement search bound");
+        for (uint256 attempt; attempt < steps; attempt++) {
             uint256 snapshot = vm.snapshotState();
             displace(aquaFirst, uint256(1e6) << attempt);
             if (aquaFirst) {

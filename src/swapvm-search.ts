@@ -1,10 +1,9 @@
 import { forEachConcurrent } from "./opportunity-queue.js";
 import { erc20Abi, type Address, type PublicClient } from "viem";
 import { executorAbi } from "./abi.js";
-import { nativeCostForQuote } from "./fees.js";
 import { same, type ChainConfig, type Settings } from "./config.js";
-import { assertFresh, ceilDiv, type Candidate } from "./strategy.js";
-import { discoverCached, quoteV3, type ExternalPool } from "./venues.js";
+import { assertFresh, type Candidate } from "./strategy.js";
+import { discoverCached, type ExternalPool } from "./venues.js";
 import type { AquaClient } from "./aqua.js";
 import type { SwapVMMarketCatalog } from "./swapvm-catalog.js";
 import type { SwapVMMarket } from "./swapvm.js";
@@ -30,38 +29,6 @@ interface SearchContext {
   aqua: AquaClient;
   catalog: SwapVMMarketCatalog;
   onEvent: (event: string, data: Record<string, unknown>) => void;
-}
-export async function swapVMGasBudget(
-  context: SearchContext,
-  baseToken: Address,
-  external: ExternalPool,
-): Promise<bigint> {
-  const { client, chain, settings } = context;
-  const fee =
-    settings.execution[String(chain.chainId)] ??
-    settings.quoteFees[String(chain.chainId)];
-  if (!fee)
-    throw new Error(
-      "A read-only fee budget must be configured before economic quotes",
-    );
-  const gasAsset = nativeCostForQuote(
-    chain,
-    fee.wrappedNative,
-    fee.maxGasUnits * fee.maxFeePerGas + fee.l1FeeReserveWei,
-  );
-  const block = await client.getBlockNumber();
-  const cost = same(gasAsset.token, baseToken)
-    ? gasAsset.amount
-    : await quoteV3(
-        client,
-        external.venue.quoter,
-        fee.gasConversionFee,
-        gasAsset.token,
-        baseToken,
-        gasAsset.amount,
-        block,
-      );
-  return ceilDiv(cost * BigInt(fee.gasCostBufferBps), 10000n);
 }
 export async function collectSwapVMChoices(
   context: SearchContext,
@@ -128,18 +95,19 @@ export async function collectSwapVMChoices(
         block.number,
       );
       await forEachConcurrent(
-        pools,
+        execution?.externalPools
+          ? pools.filter((pool) =>
+              execution.externalPools!.some((allowed) =>
+                same(allowed, pool.address),
+              ),
+            )
+          : pools,
         2,
         async (external) => {
           if (context.signal?.aborted) return;
           try {
             context.check?.();
             catalog.assertApproved(market, policy);
-            const gasBudget = await swapVMGasBudget(
-              context,
-              startToken,
-              external,
-            );
             const result = await aqua.optimizeSwapVM({
               chain,
               market,
@@ -148,7 +116,8 @@ export async function collectSwapVMChoices(
               caller,
               network: settings.networkMode,
               maxInput: inputCap,
-              gasBudget,
+              // Gross-only screening; exact fees are required by the full-transaction gate.
+              gasBudget: 0n,
               slippageBps: settings.slippageBps,
               signal: context.signal,
             });
@@ -200,11 +169,6 @@ export async function refreshSwapVMChoice(
   if (!execution?.allowBroadcast || settings.mode !== "execute")
     throw new Error("Trading is not enabled");
   catalog.assertApproved(choice.market, choice.policy);
-  const gasBudget = await swapVMGasBudget(
-    context,
-    choice.startToken,
-    choice.external,
-  );
   const fresh = await client.getBlock();
   const [balance, limit] = await Promise.all([
     client.readContract({
@@ -238,7 +202,7 @@ export async function refreshSwapVMChoice(
     network: settings.networkMode,
     maxInput: cap,
     executionPriority: true,
-    gasBudget,
+    gasBudget: 0n,
     slippageBps: settings.slippageBps,
     signal: context.signal,
     // Recompute the size too: shared backing and the external market may both have moved.

@@ -1,3 +1,4 @@
+import { FeeProfitRefusal } from "./live-fees.js";
 import { assertEconomicExecution } from "./economic-gate.js";
 import type { RuntimeControls } from "./runtime-controls.js";
 import {
@@ -6,14 +7,12 @@ import {
 } from "./opportunity-queue.js";
 import { ObsoleteScan, type ScanTask } from "./head-scheduler.js";
 import { registryBlockers } from "./registry.js";
-import { nativeCostForQuote } from "./fees.js";
 import { erc20Abi, type Address, type PublicClient } from "viem";
 import { executorAbi } from "./abi.js";
 import { AquaClient } from "./aqua.js";
 import {
   clientFor,
   discoverCached,
-  quoteV3,
   verifyChain,
   type ExternalPool,
 } from "./venues.js";
@@ -107,6 +106,8 @@ export class Runner {
       opportunity: "Rechecking selected trade",
       signing: "Signing transaction",
       simulating: "Simulating both trades",
+      fee_estimated: "Actual transaction fees checked",
+      fee_unprofitable: "No trade: fees exceed margin",
       broadcasting: "Sending transaction",
       submitted: "Waiting for receipt",
       pending_transaction: "Waiting for receipt",
@@ -462,7 +463,11 @@ export class Runner {
         venue: choice.kind,
         baseToken: choice.startToken,
         amount: choice.candidate.trade.first.amountIn,
-        conservativeNetProfit: choice.candidate.netProfit,
+        conservativeNetProfit: choice.candidate.feeEstimate
+          ? choice.candidate.netProfit
+          : null,
+        grossProfitBeforeGas: choice.candidate.quotedProfit,
+        feeStatus: choice.candidate.feeEstimate ? "estimated" : "unverified",
         selection: "best-currently-ready; does not wait for slower venues",
       });
     };
@@ -509,34 +514,12 @@ export class Runner {
             return;
           }
           const venues = await discoverCached(client, chain, pool, head.number);
-          const nativeCost =
-            config.maxGasUnits * config.maxFeePerGas + config.l1FeeReserveWei;
           await forEachConcurrent(
             venues,
             2,
             async (external) => {
               if (searchSignal.aborted) return;
               check();
-              const gasAsset = nativeCostForQuote(
-                chain,
-                config.wrappedNative,
-                nativeCost,
-              );
-              const costInBase = same(gasAsset.token, market.baseToken)
-                ? gasAsset.amount
-                : await quoteV3(
-                    client,
-                    external.venue.quoter,
-                    config.gasConversionFee,
-                    gasAsset.token,
-                    market.baseToken,
-                    gasAsset.amount,
-                    head.number,
-                  );
-              const gasCost = ceilDiv(
-                costInBase * BigInt(config.gasCostBufferBps),
-                10000n,
-              );
               try {
                 this.assertMarketApproval(market);
                 const optimized = await this.aqua.optimize({
@@ -546,7 +529,8 @@ export class Runner {
                   external,
                   network: this.settings.networkMode,
                   maxInput: inputCap,
-                  gasBudget: gasCost,
+                  // Not a zero-fee assertion: exact cost is measured only for the full chosen call.
+                  gasBudget: 0n,
                   slippageBps: this.settings.slippageBps,
                   signal: searchSignal,
                 });
@@ -653,6 +637,30 @@ export class Runner {
     choice: ReadyChoice,
     task?: ScanTask,
   ): Promise<boolean> {
+    try {
+      return await this.executePricedChoice(chain, client, choice, task);
+    } catch (error) {
+      if (!(error instanceof FeeProfitRefusal)) throw error;
+      this.event("fee_unprofitable", {
+        chainId: chain.chainId,
+        venue: choice.kind,
+        baseToken: choice.startToken,
+        grossProfitBeforeGas: error.conservativeGross,
+        estimatedGasCost: error.tokenCost,
+        requiredGross: error.requiredGross,
+        sent: false,
+        reason: "Measured fees exceed this candidate's safe profit margin",
+      });
+      // No signing/history reservation happened. Another ready route may still cover its own fees.
+      return false;
+    }
+  }
+  private async executePricedChoice(
+    chain: ChainConfig,
+    client: PublicClient,
+    choice: ReadyChoice,
+    task?: ScanTask,
+  ): Promise<boolean> {
     const chainId = chain.chainId,
       check = () => {
         task?.assertCurrent();
@@ -661,7 +669,6 @@ export class Runner {
       };
     const execution = this.settings.execution[String(chainId)];
     if (!execution) throw new Error("No execution configuration");
-    const config = execution;
     const vmContext = this.swapVMCatalog
       ? {
           client,
@@ -682,7 +689,9 @@ export class Runner {
       baseToken: choice.startToken,
       venue: choice.kind,
       amount: candidate.trade.first.amountIn,
-      conservativeNetProfit: candidate.netProfit,
+      conservativeNetProfit: candidate.feeEstimate ? candidate.netProfit : null,
+      grossProfitBeforeGas: candidate.quotedProfit,
+      feeStatus: candidate.feeEstimate ? "estimated" : "unverified",
       aquaFirst: candidate.aquaFirst,
     });
     check();
@@ -709,7 +718,7 @@ export class Runner {
           if (snapshot) task?.bindSnapshot(snapshot.number, snapshot.hash);
           vmContext.catalog.assertApproved(choice.market, choice.policy);
         },
-        (stage) => this.event(stage, { chainId }),
+        (stage, details) => this.event(stage, { chainId, ...details }),
       );
       this.metrics.submitted++;
       this.event("submitted", { chainId, hash, venue: "aqua" });
@@ -718,27 +727,6 @@ export class Runner {
     const { market, pool, external } = choice;
     // Discovery can take many blocks. Refresh the selected size and direction before reserving JIT backing.
     const fresh = await client.getBlock();
-    const other = same(market.baseToken, pool.currency0)
-      ? pool.currency1
-      : pool.currency0;
-    const nativeCost =
-      config.maxGasUnits * config.maxFeePerGas + config.l1FeeReserveWei;
-    const gasAsset = nativeCostForQuote(
-      chain,
-      config.wrappedNative,
-      nativeCost,
-    );
-    const costInBase = same(gasAsset.token, market.baseToken)
-      ? gasAsset.amount
-      : await quoteV3(
-          client,
-          external.venue.quoter,
-          config.gasConversionFee,
-          gasAsset.token,
-          market.baseToken,
-          gasAsset.amount,
-          fresh.number,
-        );
     const [balance, currentLimits] = await Promise.all([
       client.readContract({
         address: market.baseToken,
@@ -772,7 +760,7 @@ export class Runner {
       external,
       network: this.settings.networkMode,
       maxInput: inputCap,
-      gasBudget: ceilDiv(costInBase * BigInt(config.gasCostBufferBps), 10000n),
+      gasBudget: 0n,
       slippageBps: this.settings.slippageBps,
       signal: task?.signal,
       executionPriority: true,
@@ -830,7 +818,7 @@ export class Runner {
         if (snapshot) task?.bindSnapshot(snapshot.number, snapshot.hash);
         this.assertMarketApproval(market);
       },
-      (stage) => this.event(stage, { chainId }),
+      (stage, details) => this.event(stage, { chainId, ...details }),
     );
     this.metrics.submitted++;
     this.event("submitted", { chainId, hash });

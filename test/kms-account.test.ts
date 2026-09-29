@@ -12,6 +12,8 @@ import {
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import {
   createKmsAccount,
+  createOwnerDeploymentAccount,
+  createOwnerCallAccount,
   parseDerSignature,
   type KmsTransport,
 } from "../src/kms-account.js";
@@ -221,5 +223,162 @@ test("the worker account cannot sign typed authorizations or arbitrary messages"
       }),
     /not supported/i,
   );
+  assert.equal(f.calls.length, 0);
+});
+
+test("owner deployment signer signs only the exact reviewed creation once", async () => {
+  const f = fixture();
+  const tx = {
+    type: "eip1559" as const,
+    chainId: 42161,
+    nonce: 0,
+    gas: 1000000n,
+    maxFeePerGas: 20000000n,
+    maxPriorityFeePerGas: 0n,
+    value: 0n,
+    data: "0x60006000f3" as Hex,
+  };
+  const digest = keccak256(serializeTransaction(tx));
+  const config = {
+    keyId: KEY,
+    region: "us-east-1",
+    address: f.wallet.address,
+    chainId: 42161,
+  };
+  const account = await createOwnerDeploymentAccount(
+    config,
+    digest,
+    f.transport,
+  );
+  await assert.rejects(
+    () => account.signTransaction({ ...tx, gas: tx.gas + 1n }),
+    /reviewed/i,
+  );
+  await assert.rejects(
+    () => account.signTransaction({ ...tx, to: transaction.to }),
+    /creation/i,
+  );
+  await assert.rejects(
+    () => account.signTransaction({ ...tx, value: 1n }),
+    /creation/i,
+  );
+  await assert.rejects(
+    () => account.signTransaction({ ...tx, chainId: 8453 }),
+    /Arbitrum/i,
+  );
+  assert.equal(f.calls.length, 0);
+  const signed = await account.signTransaction(tx);
+  assert.equal(signed, await f.wallet.signTransaction(tx));
+  await assert.rejects(() => account.signTransaction(tx), /already/i);
+  assert.equal(f.calls.length, 1);
+});
+
+test("owner deployment support does not broaden the normal worker signer", async () => {
+  const f = fixture();
+  const config = {
+    keyId: KEY,
+    region: "us-east-1",
+    address: f.wallet.address,
+    chainId: 42161,
+  };
+  const worker = await createKmsAccount(config, f.transport);
+  const tx = {
+    type: "eip1559" as const,
+    chainId: 42161,
+    nonce: 0,
+    gas: 1000000n,
+    maxFeePerGas: 20000000n,
+    maxPriorityFeePerGas: 0n,
+    value: 0n,
+    data: "0x60006000f3" as Hex,
+  };
+  await assert.rejects(() => worker.signTransaction(tx), /cannot deploy/i);
+  await assert.rejects(
+    () =>
+      createOwnerDeploymentAccount(
+        { ...config, chainId: 8453 },
+        keccak256(serializeTransaction(tx)),
+        f.transport,
+      ),
+    /Arbitrum/i,
+  );
+  assert.equal(f.calls.length, 0);
+});
+
+test("owner setup signer is bound to one exact chain, target, value and gas envelope", async () => {
+  const f = fixture();
+  const tx = { ...transaction, chainId: 42161, value: 1000n };
+  const config = {
+    keyId: KEY,
+    region: "us-east-1",
+    address: f.wallet.address,
+    chainId: 42161,
+    target: tx.to,
+  };
+  const a = await createOwnerCallAccount(
+    config,
+    keccak256(serializeTransaction(tx)),
+    f.transport,
+  );
+  await assert.rejects(
+    () => a.signTransaction({ ...tx, value: 1001n }),
+    /reviewed/,
+  );
+  await assert.rejects(
+    () => a.signTransaction({ ...tx, chainId: 1 }),
+    /reviewed/,
+  );
+  await assert.rejects(
+    () => a.signTransaction({ ...tx, gas: tx.gas + 1n }),
+    /reviewed/,
+  );
+  await assert.rejects(
+    () =>
+      a.signTransaction({
+        ...tx,
+        to: "0x0000000000000000000000000000000000000002",
+      }),
+    /reviewed/,
+  );
+  await assert.rejects(
+    () => a.signMessage({ message: "not allowed" }),
+    /cannot/,
+  );
+  assert.equal(f.calls.length, 0);
+  const raw = await a.signTransaction(tx);
+  assert.equal(
+    await recoverTransactionAddress({
+      serializedTransaction: raw as TransactionSerialized,
+    }),
+    f.wallet.address,
+  );
+  assert.equal(raw, await f.wallet.signTransaction(tx));
+  await assert.rejects(() => a.signTransaction(tx), /already used/);
+  assert.equal(f.calls.length, 1);
+});
+
+test("a target-bound worker signer refuses owner calls even when operator and owner share a wallet", async () => {
+  const f = fixture();
+  const account = await createKmsAccount(
+    {
+      keyId: KEY,
+      region: "us-east-1",
+      address: f.wallet.address,
+      chainId: 8453,
+      target: transaction.to,
+    },
+    f.transport,
+  );
+  // setPaused(bool) and ERC20 transfer are both outside the worker execute-only boundary.
+  for (const data of [
+    "0x16c38b3c" + "0".repeat(64),
+    "0xa9059cbb" + "0".repeat(128),
+    "0x1234",
+  ]) {
+    await assert.rejects(
+      () => account.signTransaction({ ...transaction, data: data as Hex }),
+      /execute|owner|withdrawal/,
+    );
+  }
   assert.equal(f.calls.length, 0);
 });

@@ -289,6 +289,7 @@ export function acceptSwapVMOptimization(
       quoteBlockHash: r.blockHash,
       quotedProfit: q.grossProfit,
       netProfit: q.netProfit,
+      minimumNetProfit: BigInt(request.policy.minNetProfit),
       aquaFirst: q.aquaFirst,
       swapVM: context,
       trade: {
