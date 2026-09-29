@@ -1,3 +1,4 @@
+import { waitForRpcHead } from "./rpc-head.js";
 import {
   assertEconomicExecution,
   verifyEconomicAnchors,
@@ -176,7 +177,12 @@ export async function submit(
     }))
   )
     throw new Error("Operator already has a pending nonce");
-  let head = await client.getBlock();
+  let head = await waitForRpcHead(
+    client,
+    candidate.blockNumber,
+    candidate.quotedAt + settings.maxQuoteAgeMs,
+    { pollMs: settings.scheduling.headerPollMs },
+  );
   const checkQuote = (current: typeof head) => {
     assertFresh(
       candidate,
@@ -207,7 +213,12 @@ export async function submit(
     limit[1],
     onchainGasCap,
   );
-  const signingHead = await client.getBlock();
+  const signingHead = await waitForRpcHead(
+    client,
+    fees.blockNumber,
+    fees.observedAt + settings.maxQuoteAgeMs,
+    { pollMs: settings.scheduling.headerPollMs },
+  );
   if (candidate.trade.deadline <= signingHead.timestamp + 5n)
     throw new Error("Authorization near expiry during fee preparation");
   // A changed state requires a new whole-call estimate, conversion and simulation, not just old math.
@@ -234,7 +245,12 @@ export async function submit(
   assertFeeEstimateFresh(
     fees,
     candidate,
-    await client.getBlock(),
+    await waitForRpcHead(
+      client,
+      fees.blockNumber,
+      fees.observedAt + settings.maxQuoteAgeMs,
+      { pollMs: settings.scheduling.headerPollMs },
+    ),
     Date.now(),
     settings.maxQuoteAgeMs,
     settings.maxBlockLag,
@@ -282,7 +298,12 @@ export async function submit(
     nonce,
   });
   const [broadcastHead, canonicalProof] = await Promise.all([
-    client.getBlock(),
+    waitForRpcHead(
+      client,
+      fees.blockNumber,
+      fees.observedAt + settings.maxQuoteAgeMs,
+      { pollMs: settings.scheduling.headerPollMs },
+    ),
     client.getBlock({ blockNumber: fees.blockNumber }),
   ]);
   assertFeeEstimateFresh(

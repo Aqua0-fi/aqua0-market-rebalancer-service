@@ -1,3 +1,4 @@
+import { StaleCandidateError } from "./freshness.js";
 import { safeError } from "./diagnostics.js";
 import { FeeProfitRefusal } from "./live-fees.js";
 import { assertEconomicExecution } from "./economic-gate.js";
@@ -327,7 +328,11 @@ export class Runner {
         error: null,
       });
     } catch (error) {
-      if (error instanceof ObsoleteScan || task?.signal.aborted) {
+      if (
+        error instanceof ObsoleteScan ||
+        error instanceof StaleCandidateError ||
+        task?.signal.aborted
+      ) {
         this.event("obsolete_scan_discarded", {
           chainId,
           reason: safeError(task?.signal.aborted ? task.signal.reason : error),
@@ -346,6 +351,7 @@ export class Runner {
         error: safeError(error),
       });
       this.event("chain_error", { chainId, error: safeError(error) });
+      throw error;
     } finally {
       this.busy.delete(chainId);
       this.metrics.scans++;

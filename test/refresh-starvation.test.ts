@@ -507,13 +507,97 @@ test("failed SwapVM searches are reported as failures, not successful empty scan
     f.catalog,
   );
   try {
-    await runner.scanLatest(42161);
+    await assert.rejects(() => runner.scanLatest(42161), /Quote failures/);
     assert.equal(runner.metrics.errors, 1);
     assert.equal(runner.metrics.lastSuccess, 0);
     const activity = JSON.stringify(runner.reportingStatus().recentActivity);
     assert(!activity.includes("private-key"));
     assert(activity.includes("RPC or API URL"));
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a refresh waits for a lagging provider before canonical validation instead of throwing a false reorg", async () => {
+  const f = fixture();
+  f.settings.scheduling.headerPollMs = 100;
+  let quoteReturned = false,
+    laggingReads = 0;
+  const underlying = f.client.getBlock;
+  const client = {
+    ...f.client,
+    getBlock: async (p?: { blockNumber?: bigint }) => {
+      if (p?.blockNumber !== undefined) return underlying(p as never);
+      if (!quoteReturned)
+        return {
+          ...head(100),
+          timestamp: BigInt(Math.floor(Date.now() / 1000)),
+        };
+      laggingReads++;
+      return {
+        ...head(laggingReads === 1 ? 100 : 102),
+        timestamp: BigInt(Math.floor(Date.now() / 1000)),
+      };
+    },
+  } as unknown as PublicClient;
+  const aqua = {
+    optimizeSwapVM: async (r: SwapVMSizingRequest) => {
+      quoteReturned = true;
+      return f.result(102, r);
+    },
+  } as unknown as AquaClient;
+  const answer = await refreshSwapVMChoice(
+    { ...f, client, aqua, onEvent: () => {} },
+    f.choice,
+  );
+  assert(answer);
+  assert.equal(answer.blockNumber, 102n);
+  assert.equal(laggingReads, 2);
+});
+
+test("failed scans do not inflate the scheduler's successful completion counter", async () => {
+  const f = fixture(),
+    dir = mkdtempSync(join(tmpdir(), "failed-completion-"));
+  const aqua = {
+    optimizeSwapVM: async () => {
+      throw Error("RPC unavailable");
+    },
+    searchStatus: () => ({
+      active: 0,
+      queued: 0,
+      limit: 4,
+      perChainLimit: 2,
+      selectedTradeChecksQueued: 0,
+    }),
+  } as unknown as AquaClient;
+  class OfflineRunner extends Runner {
+    override client() {
+      return f.client;
+    }
+  }
+  const runner = new OfflineRunner(
+    [f.chain],
+    { ...f.settings, mode: "observe" },
+    aqua,
+    new Journal(join(dir, "journal.json")),
+    undefined,
+    undefined,
+    f.catalog,
+  );
+  const scheduler = new LatestHeadScheduler({
+    maxConcurrent: 1,
+    maxBlockLag: 8,
+    maxTaskMs: 8000,
+    run: (id, t) => runner.scanLatest(id, t),
+  });
+  try {
+    scheduler.notify(42161, head(100));
+    await scheduler.drain();
+    assert.equal(scheduler.status()[0]!.completed, 0);
+    assert.equal(scheduler.status()[0]!.failures, 1);
+    assert.equal(runner.metrics.lastSuccess, 0);
+  } finally {
+    await scheduler.stop();
     rmSync(dir, { recursive: true, force: true });
   }
 });

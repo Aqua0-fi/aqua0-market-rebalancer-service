@@ -1,3 +1,4 @@
+import { StaleCandidateError } from "./freshness.js";
 import { randomBytes } from "node:crypto";
 import type { Address, Hex } from "viem";
 import type { SwapVMExecutionContext } from "./swapvm.js";
@@ -123,5 +124,7 @@ export function assertFresh(
     head < candidate.blockNumber ||
     head - candidate.blockNumber > BigInt(maxBlockLag)
   )
-    throw new Error("Stale or reorged candidate");
+    throw new StaleCandidateError(
+      `Stale or reorged candidate: quoteBlock=${candidate.blockNumber}, rpcHead=${head}, ageMs=${now - candidate.quotedAt}, maxLag=${maxBlockLag}, maxAgeMs=${maxAgeMs}`,
+    );
 }

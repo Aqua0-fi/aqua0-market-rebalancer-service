@@ -1,3 +1,5 @@
+import { waitForRpcHead } from "./rpc-head.js";
+import { StaleCandidateError } from "./freshness.js";
 import { ObsoleteScan } from "./head-scheduler.js";
 import { safeError } from "./diagnostics.js";
 import { forEachConcurrent } from "./opportunity-queue.js";
@@ -132,9 +134,18 @@ export async function collectSwapVMChoices(
             });
             for (const candidate of result.candidates) {
               if (context.signal?.aborted) return;
+              const quoteHead = await waitForRpcHead(
+                client,
+                candidate.blockNumber,
+                candidate.quotedAt + settings.maxQuoteAgeMs,
+                {
+                  pollMs: settings.scheduling.headerPollMs,
+                  signal: context.signal,
+                },
+              );
               assertFresh(
                 candidate,
-                await client.getBlockNumber(),
+                quoteHead.number,
                 Date.now(),
                 settings.maxQuoteAgeMs,
                 settings.maxBlockLag,
@@ -161,7 +172,11 @@ export async function collectSwapVMChoices(
             }
           } catch (error) {
             if (context.signal?.aborted) return;
-            if (error instanceof ObsoleteScan) throw error;
+            if (
+              error instanceof ObsoleteScan ||
+              error instanceof StaleCandidateError
+            )
+              throw error;
             context.onEvent("swapvm_sizing_rejected", {
               chainId: chain.chainId,
               strategyId: market.stableStrategyId,
@@ -236,9 +251,15 @@ export async function refreshSwapVMChoice(
     context.check?.();
     return null;
   }
+  const quoteHead = await waitForRpcHead(
+    client,
+    candidate.blockNumber,
+    candidate.quotedAt + settings.maxQuoteAgeMs,
+    { pollMs: settings.scheduling.headerPollMs, signal: context.signal },
+  );
   assertFresh(
     candidate,
-    await client.getBlockNumber(),
+    quoteHead.number,
     Date.now(),
     settings.maxQuoteAgeMs,
     settings.maxBlockLag,

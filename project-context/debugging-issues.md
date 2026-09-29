@@ -107,3 +107,21 @@ update changes only the image pin and restarts the existing service. Settings, c
 permissions, pauses and runtime data remain intact. If a transaction becomes pending during the stop,
 the helper resumes the old image without deleting it. Rollback never restores old runtime/history
 files over newer execution evidence. Six isolated host-update regressions cover these boundaries.
+
+### Provider skew found after the owner's first repair update
+
+The owner's first image update completed at 04:46 UTC and its isolated exact-call timing probe
+passed in 2.273 seconds. The continuous worker then rejected candidates before fee preparation.
+A separate read-only comparison caught a quote at block 509926684 while the public RPC's latest
+answer was still 509926682. The old generic freshness check treated this ordinary provider skew
+as a stale/reorganized quote, even though the quote endpoint was no-store and returned current data.
+
+`waitForRpcHead` now waits for an actual latest-head response to reach the quote or simulation
+block, bounded by the existing freshness deadline and poll interval. It never substitutes a quoted
+block number for RPC evidence. The ordinary block-lag, time-age and canonical-hash checks still
+follow. A late RPC response, expired budget, cancellation or unreachable future height refuses.
+Transient freshness mismatches are discarded as outdated work rather than inflating the error
+backoff. Genuine failed scans propagate to the scheduler's failure count instead of its success
+count. Three read-only live quote checks verified canonical hashes after alignment; no transaction
+was signed or broadcast by those checks. The owner-run preflight must include the same head alignment
+and quote freshness checks before the next image update.
