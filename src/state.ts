@@ -51,9 +51,9 @@ export class Journal {
     );
   }
   set(key: string, value: Entry): void {
-    this.state[key] = value;
+    const nextState = { ...this.state, [key]: entry.parse(value) };
     const tmp = `${this.path}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.state, null, 2), { mode: 0o600 });
+    writeFileSync(tmp, JSON.stringify(nextState, null, 2), { mode: 0o600 });
     const fd = openSync(tmp, "r");
     try {
       fsyncSync(fd);
@@ -68,6 +68,8 @@ export class Journal {
     } finally {
       closeSync(directory);
     }
+    // Failed persistence must not release a pending hash only in memory.
+    this.state = nextState;
   }
   reserve(
     key: string,

@@ -20,7 +20,7 @@
     "format:check": "prettier --check src test scripts/*.ts config/*.json README.md AGENTS.md project-context/*.md && forge fmt --check contracts",
     "test:heads": "node --import tsx --test test/head-feed.integration.ts",
     "verify:registry": "python3 scripts/verify-registry-provenance.py",
-    "test:owner-host": "python3 -m unittest discover -s ops -p 'test_owner_pilot_remote.py' && python3 -m unittest discover -s ops -p 'test_owner_refresh_remote.py'"
+    "test:owner-host": "python3 -m unittest discover -s ops -p 'test_owner_pilot_remote.py' && python3 -m unittest discover -s ops -p 'test_owner_refresh_remote.py' && python3 -m unittest discover -s ops -p 'test_owner_reconcile_remote.py'"
   },
   "dependencies": {
     "@aws-sdk/client-kms": "3.1095.0",

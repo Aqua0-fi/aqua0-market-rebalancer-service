@@ -125,3 +125,38 @@ backoff. Genuine failed scans propagate to the scheduler's failure count instead
 count. Three read-only live quote checks verified canonical hashes after alignment; no transaction
 was signed or broadcast by those checks. The owner-run preflight must include the same head alignment
 and quote freshness checks before the next image update.
+
+### First live execution succeeded; receipt event selection prevented recording
+
+The first owner-enabled Arbitrum trade at 04:55:04 UTC succeeded in block 509927826. The actual
+receipt and its prepared record are pinned in `test/fixtures/arbitrum-first-execution.json`.
+It spent 3.871550 USDC and earned 0.704396 USDC gross. Receipt gas was 0.000017603901 ETH.
+The existing backend's mainnet RPC supplied the historical exact-output conversion: 0.046953 USDC
+of gas replacement cost, giving 0.657443 USDC net for this trade. Setup, funding and deployment
+costs are separate from this single-trade result. No LP return or withdrawal was performed.
+
+The receipt contains both `SwapVMLegExecuted` and `Executed`. Passing `eventName` to the existing
+multi-event ABI decoder did not filter its runtime topic selection: the final execution was decoded
+again in the SwapVM branch and rejected as a duplicate/mismatched leg. Separate ABI projections
+now decode each fact. The exact real receipt passes, including when event order changes. Wrong
+identity, missing evidence and duplicate matching events still fail. The worker now exposes receipt
+recording errors instead of reporting this mined hash as generically pending forever.
+
+The ordinary public RPC had already pruned that receipt's historical state when recovery was
+attempted. The existing backend mainnet RPC was read in memory for the exact historical valuation;
+no provider account was created, no live RPC setting was replaced and no authenticated URL was
+published. A temporary local-file run of the compiled recovery command verified preview-only
+behavior, one settled record with the actual net result, and an idempotent second apply.
+
+`src/reconciliation.ts` and `src/receipt-recovery.ts` are receipt-only paths with no runtime import
+of the worker loop, wallet or KMS signer. Recovery binds the hash, chain, sender, executor, nonce,
+prepared trade, canonical block and complete historical fee evidence. It persists history before
+releasing the same pending journal entry, retains existing economic pauses and keeps daily gas
+reservations unchanged. Journal persistence failures no longer clear pending state only in memory.
+
+`ops/owner-reconcile-arbitrum.py` is an owner-confirmed maintenance command. It stops the existing
+worker, preserves a backup, runs the receipt-only process under the runtime flock without signer
+credentials, verifies persisted state and starts the repaired image with the same settings. An
+uncertain recovery leaves the worker stopped; it never deletes pending evidence or restores old
+history over a partial successful settlement. The new runtime still needs its exact-image build
+and owner-applied release before these source fixes describe the live service.

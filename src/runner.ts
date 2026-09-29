@@ -20,7 +20,8 @@ import {
 } from "./venues.js";
 import { findPool, same, type ChainConfig, type Settings } from "./config.js";
 import { ceilDiv, assertFresh, type Candidate } from "./strategy.js";
-import { reconcile, submit } from "./execution.js";
+import { submit } from "./execution.js";
+import { reconcile } from "./reconciliation.js";
 import { Journal } from "./state.js";
 import type { HistoryStore } from "./history.js";
 import type { MarketCatalog } from "./market-catalog.js";
@@ -105,6 +106,7 @@ export class Runner {
       broadcasting: "Sending transaction",
       submitted: "Waiting for receipt",
       pending_transaction: "Waiting for receipt",
+      reconciliation_blocked: "Receipt recording needs attention",
       operator_paused: "Paused by operator",
       economic_paused: "Paused for economic review",
       chain_error: "Needs attention",
@@ -125,6 +127,7 @@ export class Runner {
       "opportunity_ready",
       "opportunity",
       "submitted",
+      "reconciliation_blocked",
       "operator_paused",
       "economic_paused",
       "chain_error",
@@ -378,6 +381,7 @@ export class Runner {
     }
     const execution = this.settings.execution[String(chainId)];
     // Reconcile pending transactions even when a policy or quote profile changed.
+    let reconciliationIssue = false;
     if (
       !(await reconcile(
         client,
@@ -385,9 +389,19 @@ export class Runner {
         this.settings,
         this.journal,
         this.history,
+        {
+          onIssue: (issue) => {
+            reconciliationIssue = true;
+            this.event("reconciliation_blocked", {
+              chainId,
+              reason: `${issue.stage}: ${issue.reason}`,
+              hash: issue.hash,
+            });
+          },
+        },
       ))
     ) {
-      this.event("pending_transaction", { chainId });
+      if (!reconciliationIssue) this.event("pending_transaction", { chainId });
       return;
     }
     if (

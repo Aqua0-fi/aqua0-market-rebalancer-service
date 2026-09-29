@@ -13,13 +13,13 @@ from pathlib import Path
 CONFIG = Path('/etc/aqua0-market-rebalancer')
 DATA = Path('/var/lib/aqua0-market-rebalancer')
 BACKUPS = Path('/var/lib/aqua0-market-rebalancer-backups')
-BUILD = Path('/home/ubuntu/market-rebalancer-builds/20260929-refresh-3e0bead')
+BUILD = Path('/home/ubuntu/market-rebalancer-builds/20260929-head-align-eb79f02')
 RUNNER = Path('/opt/aqua0-market-rebalancer/run-observer-container.sh')
 UNIT = 'aqua0-market-rebalancer.service'
 CONTAINER = 'aqua0-market-rebalancer'
-SOURCE = '3e0beaddcdba0a42d6b894242c49bebff987bd99'
-OLD = 'sha256:abade56afd74dc92abd3f95003dbb446719dc4f4a5aa731f7674b347627cb36e'
-NEW = 'sha256:4ffa8e6394f59a80a1fd2caf84246878db89e974609ae4e6362cc547f3592312'
+SOURCE = 'eb79f029e83e52616e193dea4a886c58707acea6'
+OLD = 'sha256:4ffa8e6394f59a80a1fd2caf84246878db89e974609ae4e6362cc547f3592312'
+NEW = 'sha256:23d2b8bba286faad7066f60962c8b922b0cd187d8ba1ebdc45316f842eb0c421'
 
 
 def run(args, timeout=30):
@@ -120,7 +120,13 @@ def probe(expected_hash):
             '--cpus', '0.50', '--memory', '512m', '--memory-swap', '512m', '--pids-limit', '128',
             '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
             '--entrypoint', 'node', '--mount', 'type=bind,src=' + str(path) + ',dst=/app/probe.mjs,readonly', NEW, '/app/probe.mjs']
-    result = subprocess.run(args, input=json.dumps({'readKey': secret['AQUA0_READ_API_KEY']}),
+    pilot = json.loads((BUILD / 'source/config/arbitrum-pilot.json').read_text())
+    rows = get('/v1/aqua-markets').get('markets', [])
+    chosen = next((row for row in rows if row.get('market', {}).get('stableStrategyId', '').lower() == pilot['strategyId'].lower()), None)
+    if not chosen or not chosen.get('readyToQuote') or not (chosen.get('policy') or {}).get('approved'):
+        raise RuntimeError('The currently approved pilot strategy must be available for the read-only check')
+    payload = {'readKey': secret['AQUA0_READ_API_KEY'], 'settings': json.loads((CONFIG / 'settings.json').read_text()), 'policy': chosen['policy']}
+    result = subprocess.run(args, input=json.dumps(payload),
                             text=True, capture_output=True, timeout=100)
     if result.returncode:
         raise RuntimeError('Read-only image validation did not complete; active service unchanged')
@@ -155,9 +161,13 @@ def main(request):
     if request['action'] == 'status':
         return {'state': 'ready-for-owner-validation', 'currentImage': OLD, 'repairImage': NEW,
                 'mode': 'execute', 'changed': False, 'liveTimingVerified': False}
-    validation = probe(request['probeHash'])
-    if validation.get('finalProofFresh') is not True or validation.get('withinCurrentTaskBudget') is not True:
-        return {'state': 'validation-blocked', 'changed': False, 'validation': validation}
+    validations = []
+    for _ in range(2):
+        validation = probe(request['probeHash'])
+        validations.append(validation)
+        if validation.get('finalProofFresh') is not True or validation.get('withinCurrentTaskBudget') is not True:
+            return {'state': 'validation-blocked', 'changed': False, 'validation': validation, 'validationAttempts': len(validations)}
+    validation['previousPipelineMs'] = validations[0].get('pipelineMs')
     # The probe must not overwrite any concurrent owner edit or transaction.
     if snapshot() != before:
         raise RuntimeError('Worker state changed during preflight; leave the current service alone')

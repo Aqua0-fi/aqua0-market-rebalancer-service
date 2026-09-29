@@ -10,6 +10,7 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('owner_refresh_remote', Path(__file__).with_name('owner-refresh-remote.py'))
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+REAL_PROBE = m.probe
 
 
 class OwnerRefreshTests(unittest.TestCase):
@@ -132,6 +133,31 @@ class OwnerRefreshTests(unittest.TestCase):
         self.assertTrue(self.active)
         self.assertEqual((m.DATA / 'new-pending-proof.json').read_text(), 'do not erase this')
         self.assertEqual((m.DATA / 'history.sqlite').read_bytes(), b'preserve this history')
+
+    def test_probe_uses_live_settings_and_policy_without_mounting_signer_or_runtime(self):
+        from types import SimpleNamespace
+        source = m.BUILD / 'source/config'
+        source.mkdir(parents=True)
+        (source / 'arbitrum-pilot.json').write_text(json.dumps({'strategyId': 'unchanged-strategy'}))
+        program = m.BUILD / 'host-readonly-probe.mjs'
+        program.write_text('test-only program bytes')
+        (m.CONFIG / 'observer.json').write_text(json.dumps({'AQUA0_READ_API_KEY': 'test-only-' * 3}))
+        policy = {'approved': True, 'maxInput': '1000000', 'minNetProfit': '20000', 'version': 4}
+        def fake_get(path):
+            self.assertEqual(path, '/v1/aqua-markets')
+            return {'markets': [{'market': {'stableStrategyId': 'unchanged-strategy'}, 'readyToQuote': True, 'policy': policy}]}
+        def fake_process(args, **kwargs):
+            payload = json.loads(kwargs['input'])
+            self.assertEqual(set(payload), {'readKey', 'settings', 'policy'})
+            self.assertEqual(payload['policy'], policy)
+            self.assertEqual(payload['settings']['mode'], 'execute')
+            self.assertNotIn(str(m.DATA), ' '.join(args))
+            self.assertNotIn('signer/aws', ' '.join(args))
+            self.assertNotIn('--env', args)
+            return SimpleNamespace(returncode=0, stdout=json.dumps({'sourceCommit': m.SOURCE, 'signatures': 0, 'transactions': 0, 'liveSettingsChanged': False}))
+        with patch.object(m, 'get', fake_get), patch.object(m.subprocess, 'run', fake_process):
+            result = REAL_PROBE(m.digest(program))
+        self.assertEqual(result['signatures'], 0)
 
     def test_noninteractive_owner_wrapper_refuses_before_reading_release_or_ssh(self):
         p = subprocess.run(['python3', str(Path(__file__).with_name('owner-refresh-arbitrum.py')), '--apply'], input='', text=True, capture_output=True)
