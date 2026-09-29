@@ -1,3 +1,17 @@
+# Latest Arbitrum owner-start release, 2026-09-29
+
+Read `evidence/releases/20260929-measured-pilot/release.json` and
+`project-context/measured-fees-and-pilot.md` before using older checkpoints below.
+The measured-fee worker source is `0f7fb6c04114a640734a605776207412711bf2ae`; its verified AWS image is
+`sha256:abade56afd74dc92abd3f95003dbb446719dc4f4a5aa731f7674b347627cb36e`.
+Backend PR603 and frontend PR612/613 are merged and successfully deployed to staging.
+The observed actual-vault route and owner funding/refund calldata pass real Arbitrum forks.
+The owner was given the single `ops/owner-start-arbitrum.py --enable` command with interactive
+confirmation. At release verification the executor was still paused, the observer was watch-only,
+and no owner setup, inventory conversion or mainnet arbitrage was performed by this agent.
+Check the owner's local pilot journal and current chain before claiming a subsequent activation.
+Do not deploy the executor again, enable other chains, clear economic pauses or send automatic LP returns.
+
 # Context
 
 ## Latest release reference

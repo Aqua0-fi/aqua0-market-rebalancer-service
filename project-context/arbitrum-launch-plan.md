@@ -40,3 +40,17 @@ Its fee floor uses live gas price plus 5%, actual call gas, real network extras 
 conversion. The source includes a one-command owner setup, private durable intent journal and local-fork
 proofs for both the observed arbitrage and exact-USDC funding/refund. No live setup or trade was executed
 by the agent. Publish and verify the new observe-only image before emitting its owner activation receipt.
+
+### Verified release cutover
+
+Worker CI runs 36508103659 and 36508098393 both passed on `0f7fb6c`. Its resource-bounded AWS
+build and no-network runtime smoke passed. The image-only cutover verified unchanged settings,
+credentials, market permissions, operating/economic controls and pending journal. It remained
+observe-only, Arbitrum-only and at zero stored executions. Exact backup and image identifiers are
+in `evidence/releases/20260929-measured-pilot/release.json`.
+
+The protected deployed LP and rebalancer pages passed at 1440 and 390 pixels: anonymous 401,
+authenticated 200, no runtime/HTTP errors or horizontal overflow, and no operating controls clicked.
+A verified local owner-start release receipt now exists under the ignored `runtime/owner-launch/`.
+Needle message 2018 delivered the one-command owner entrypoint. No mainnet financial action was
+performed to manufacture a successful launch result.
