@@ -7,6 +7,15 @@ import {
   type TransactionReceipt,
 } from "viem";
 import { executorAbi, poolTuple } from "./abi.js";
+// decodeEventLog selects by topic from the supplied ABI. Its eventName type hint does not
+// filter runtime topics, so each independent receipt fact needs its own ABI projection.
+const executedEventAbi = executorAbi.filter(
+  (item) => item.type === "event" && item.name === "Executed",
+);
+const swapVMLegEventAbi = executorAbi.filter(
+  (item) => item.type === "event" && item.name === "SwapVMLegExecuted",
+);
+
 import { same, type ChainConfig, type Settings } from "./config.js";
 import type { Candidate } from "./strategy.js";
 import type { ExecutionRecord } from "./history.js";
@@ -102,7 +111,7 @@ export function executionReceipt(
     if (same(log.address, record.executor)) {
       try {
         const event = decodeEventLog({
-          abi: executorAbi,
+          abi: executedEventAbi,
           eventName: "Executed",
           data: log.data,
           topics: log.topics,
@@ -130,7 +139,7 @@ export function executionReceipt(
       let decoded;
       try {
         decoded = decodeEventLog({
-          abi: executorAbi,
+          abi: swapVMLegEventAbi,
           eventName: "SwapVMLegExecuted",
           data: log.data,
           topics: log.topics,

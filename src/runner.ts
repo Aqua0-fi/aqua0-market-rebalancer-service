@@ -1,3 +1,5 @@
+import { StaleCandidateError } from "./freshness.js";
+import { safeError } from "./diagnostics.js";
 import { FeeProfitRefusal } from "./live-fees.js";
 import { assertEconomicExecution } from "./economic-gate.js";
 import type { RuntimeControls } from "./runtime-controls.js";
@@ -18,7 +20,8 @@ import {
 } from "./venues.js";
 import { findPool, same, type ChainConfig, type Settings } from "./config.js";
 import { ceilDiv, assertFresh, type Candidate } from "./strategy.js";
-import { reconcile, submit } from "./execution.js";
+import { submit } from "./execution.js";
+import { reconcile } from "./reconciliation.js";
 import { Journal } from "./state.js";
 import type { HistoryStore } from "./history.js";
 import type { MarketCatalog } from "./market-catalog.js";
@@ -38,16 +41,8 @@ export const log = (
 ): void => {
   console.log(json({ time: new Date().toISOString(), event, ...data }));
 };
-export function safeError(error: unknown): string {
-  const message =
-    error instanceof Error
-      ? (error.message.split("\n")[0] ?? error.name)
-      : "Unknown failure";
-  return message
-    .replace(/https?:\/\/\S+/gi, "[RPC or API URL]")
-    .replace(/0x[0-9a-fA-F]{64}/g, "[redacted]")
-    .slice(0, 220);
-}
+export { safeError } from "./diagnostics.js";
+
 type ReadyChoice =
   | {
       kind: "v4";
@@ -111,6 +106,7 @@ export class Runner {
       broadcasting: "Sending transaction",
       submitted: "Waiting for receipt",
       pending_transaction: "Waiting for receipt",
+      reconciliation_blocked: "Receipt recording needs attention",
       operator_paused: "Paused by operator",
       economic_paused: "Paused for economic review",
       chain_error: "Needs attention",
@@ -131,6 +127,7 @@ export class Runner {
       "opportunity_ready",
       "opportunity",
       "submitted",
+      "reconciliation_blocked",
       "operator_paused",
       "economic_paused",
       "chain_error",
@@ -324,7 +321,7 @@ export class Runner {
     this.metrics.scanStartedAt = started;
     this.event("scan_started", { chainId });
     try {
-      task?.assertCurrent();
+      task?.assertActive();
       await this.scanChain(chainId, task);
       this.errors.set(chainId, 0);
       this.retryAt.delete(chainId);
@@ -334,8 +331,15 @@ export class Runner {
         error: null,
       });
     } catch (error) {
-      if (error instanceof ObsoleteScan || task?.signal.aborted) {
-        this.event("obsolete_scan_discarded", { chainId });
+      if (
+        error instanceof ObsoleteScan ||
+        error instanceof StaleCandidateError ||
+        task?.signal.aborted
+      ) {
+        this.event("obsolete_scan_discarded", {
+          chainId,
+          reason: safeError(task?.signal.aborted ? task.signal.reason : error),
+        });
         throw new ObsoleteScan();
       }
       const count = (this.errors.get(chainId) ?? 0) + 1;
@@ -350,6 +354,7 @@ export class Runner {
         error: safeError(error),
       });
       this.event("chain_error", { chainId, error: safeError(error) });
+      throw error;
     } finally {
       this.busy.delete(chainId);
       this.metrics.scans++;
@@ -359,11 +364,11 @@ export class Runner {
   }
   private async scanChain(chainId: number, task?: ScanTask): Promise<void> {
     const check = () => {
-      task?.assertCurrent();
+      task?.assertActive();
       if (this.controls?.paused(chainId))
         throw new ObsoleteScan("New checks and trades are paused");
     };
-    task?.assertCurrent();
+    task?.assertActive();
     const configured = this.chains.find((c) => c.chainId === chainId);
     if (!configured) throw new Error("Unknown configured chain");
     const chain = this.settings.discovery.enabled
@@ -376,6 +381,7 @@ export class Runner {
     }
     const execution = this.settings.execution[String(chainId)];
     // Reconcile pending transactions even when a policy or quote profile changed.
+    let reconciliationIssue = false;
     if (
       !(await reconcile(
         client,
@@ -383,9 +389,19 @@ export class Runner {
         this.settings,
         this.journal,
         this.history,
+        {
+          onIssue: (issue) => {
+            reconciliationIssue = true;
+            this.event("reconciliation_blocked", {
+              chainId,
+              reason: `${issue.stage}: ${issue.reason}`,
+              hash: issue.hash,
+            });
+          },
+        },
       ))
     ) {
-      this.event("pending_transaction", { chainId });
+      if (!reconciliationIssue) this.event("pending_transaction", { chainId });
       return;
     }
     if (
@@ -457,6 +473,7 @@ export class Runner {
       }
       check();
       choices.push(choice);
+      this.metrics.candidates++;
       executionQueue?.offer(choice);
       this.event("opportunity_ready", {
         chainId,
@@ -600,8 +617,23 @@ export class Runner {
           settings: this.settings,
           aqua: this.aqua,
           catalog: this.swapVMCatalog,
-          onEvent: (event: string, data: Record<string, unknown>) =>
-            this.event(event, data),
+          onEvent: (event: string, data: Record<string, unknown>) => {
+            if (event === "swapvm_sizing_rejected") quoteFailures++;
+            if (
+              event === "swapvm_automatic_sizing" &&
+              Array.isArray(data.searches)
+            ) {
+              completedQuotes += data.searches.reduce(
+                (sum, search) =>
+                  sum +
+                  (Number.isSafeInteger(search.evaluatedInputs)
+                    ? search.evaluatedInputs
+                    : 0),
+                0,
+              );
+            }
+            this.event(event, data);
+          },
           check,
           signal: searchSignal,
           onCandidate: offer,
@@ -613,7 +645,16 @@ export class Runner {
     ]);
     // Started reads are drained even if sending fails, so no late callback can launch a second account lane.
     const accepted = await executionQueue?.settle();
-    this.metrics.candidates += choices.length;
+    if (!accepted) {
+      check();
+      const error = reads.find(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected",
+      );
+      if (error) throw error.reason;
+      if (quoteFailures && choices.length === 0)
+        throw new Error("Quote failures prevented a healthy scan");
+    }
     this.event("scan_complete", {
       chainId,
       candidates: choices.length,
@@ -622,14 +663,6 @@ export class Runner {
       mode: this.settings.mode,
       submitted: !!accepted,
     });
-    if (accepted) return;
-    check();
-    const error = reads.find(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
-    );
-    if (error) throw error.reason;
-    if (quoteFailures && choices.length === 0)
-      throw new Error("Quote failures prevented a healthy scan");
   }
   private async executeChoice(
     chain: ChainConfig,
@@ -663,7 +696,7 @@ export class Runner {
   ): Promise<boolean> {
     const chainId = chain.chainId,
       check = () => {
-        task?.assertCurrent();
+        task?.assertActive();
         if (this.controls?.paused(chainId))
           throw new ObsoleteScan("New checks and trades are paused");
       };
@@ -715,7 +748,8 @@ export class Runner {
         undefined,
         (snapshot) => {
           check();
-          if (snapshot) task?.bindSnapshot(snapshot.number, snapshot.hash);
+          if (snapshot)
+            task?.bindExecutionSnapshot(snapshot.number, snapshot.hash);
           vmContext.catalog.assertApproved(choice.market, choice.policy);
         },
         (stage, details) => this.event(stage, { chainId, ...details }),
@@ -815,7 +849,8 @@ export class Runner {
       undefined,
       (snapshot) => {
         check();
-        if (snapshot) task?.bindSnapshot(snapshot.number, snapshot.hash);
+        if (snapshot)
+          task?.bindExecutionSnapshot(snapshot.number, snapshot.hash);
         this.assertMarketApproval(market);
       },
       (stage, details) => this.event(stage, { chainId, ...details }),

@@ -1,8 +1,8 @@
+import { waitForRpcHead } from "./rpc-head.js";
 import {
   assertEconomicExecution,
   verifyEconomicAnchors,
 } from "./economic-gate.js";
-import { valueSettlementFees } from "./settlement-economics.js";
 import {
   createWalletClient,
   http,
@@ -15,10 +15,10 @@ import type { KmsTransport } from "./kms-account.js";
 import { executorAbi } from "./abi.js";
 import { rpcUrl, same, type ChainConfig, type Settings } from "./config.js";
 import { assertFresh, type Candidate } from "./strategy.js";
-import { finalizeCandidateFees } from "./live-fees.js";
+import { finalizeCandidateFees, assertFeeEstimateFresh } from "./live-fees.js";
 import { Journal } from "./state.js";
 import { HistoryStore } from "./history.js";
-import { preparedExecution, executionReceipt } from "./execution-history.js";
+import { preparedExecution } from "./execution-history.js";
 export async function submit(
   client: PublicClient,
   chain: ChainConfig,
@@ -176,7 +176,12 @@ export async function submit(
     }))
   )
     throw new Error("Operator already has a pending nonce");
-  let head = await client.getBlock();
+  let head = await waitForRpcHead(
+    client,
+    candidate.blockNumber,
+    candidate.quotedAt + settings.maxQuoteAgeMs,
+    { pollMs: settings.scheduling.headerPollMs },
+  );
   const checkQuote = (current: typeof head) => {
     assertFresh(
       candidate,
@@ -207,8 +212,14 @@ export async function submit(
     limit[1],
     onchainGasCap,
   );
-  const signingHead = await client.getBlock();
-  checkQuote(signingHead);
+  const signingHead = await waitForRpcHead(
+    client,
+    fees.blockNumber,
+    fees.observedAt + settings.maxQuoteAgeMs,
+    { pollMs: settings.scheduling.headerPollMs },
+  );
+  if (candidate.trade.deadline <= signingHead.timestamp + 5n)
+    throw new Error("Authorization near expiry during fee preparation");
   // A changed state requires a new whole-call estimate, conversion and simulation, not just old math.
   if (signingHead.hash !== head.hash) {
     head = signingHead;
@@ -230,7 +241,19 @@ export async function submit(
       onchainGasCap,
     );
   }
-  checkQuote(await client.getBlock());
+  assertFeeEstimateFresh(
+    fees,
+    candidate,
+    await waitForRpcHead(
+      client,
+      fees.blockNumber,
+      fees.observedAt + settings.maxQuoteAgeMs,
+      { pollMs: settings.scheduling.headerPollMs },
+    ),
+    Date.now(),
+    settings.maxQuoteAgeMs,
+    settings.maxBlockLag,
+  );
   if (
     (await client.getTransactionCount({
       address: account.address,
@@ -273,6 +296,30 @@ export async function submit(
     gasPrice,
     nonce,
   });
+  const [broadcastHead, canonicalProof] = await Promise.all([
+    waitForRpcHead(
+      client,
+      fees.blockNumber,
+      fees.observedAt + settings.maxQuoteAgeMs,
+      { pollMs: settings.scheduling.headerPollMs },
+    ),
+    client.getBlock({ blockNumber: fees.blockNumber }),
+  ]);
+  assertFeeEstimateFresh(
+    fees,
+    candidate,
+    broadcastHead,
+    Date.now(),
+    settings.maxQuoteAgeMs,
+    settings.maxBlockLag,
+  );
+  if (
+    canonicalProof.hash !== fees.blockHash ||
+    candidate.trade.deadline <= broadcastHead.timestamp + 5n
+  )
+    throw new Error(
+      "Execution proof reorganized or authorization expired during signing",
+    );
   beforeBroadcast?.(simulatedAt);
   assertEconomicExecution(history, settings.networkMode);
   const hash = keccak256(signed);
@@ -296,58 +343,4 @@ export async function submit(
   history?.acknowledgeBroadcast(settings.networkMode, chain.chainId, hash);
   return hash;
 }
-export async function reconcile(
-  client: PublicClient,
-  chain: ChainConfig,
-  settings: Settings,
-  journal: Journal,
-  history?: HistoryStore,
-): Promise<boolean> {
-  const config = settings.execution[String(chain.chainId)];
-  if (!config) return true;
-  const key = `${chain.chainId}:${config.operator.toLowerCase()}`;
-  const e = journal.get(key);
-  if (!e.pending) return true;
-  try {
-    const receipt = await client.getTransactionReceipt({
-      hash: e.pending.hash as Hex,
-    });
-    const head = await client.getBlockNumber();
-    if (head - receipt.blockNumber + 1n < BigInt(settings.confirmations))
-      return false;
-    const canonical = await client.getBlock({
-      blockNumber: receipt.blockNumber,
-    });
-    if (canonical.hash !== receipt.blockHash) return false;
-    // A failed history write keeps the pending hash locked for reconciliation on the next scan.
-    const prepared = history?.get(
-      settings.networkMode,
-      chain.chainId,
-      e.pending.hash,
-    );
-    if (e.pending.historyRequired && !prepared)
-      throw new Error("Required execution history is missing");
-    if (prepared && history) {
-      history.settle(
-        settings.networkMode,
-        chain.chainId,
-        e.pending.hash,
-        receipt.status === "success" ? "confirmed" : "reverted",
-        await valueSettlementFees(
-          client,
-          prepared,
-          receipt,
-          executionReceipt(prepared, receipt, canonical.timestamp, chain),
-        ),
-      );
-    }
-    const { pending: _, ...rest } = e;
-    journal.set(key, {
-      ...rest,
-      errors: receipt.status === "success" ? 0 : e.errors + 1,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
+export { reconcile } from "./reconciliation.js";

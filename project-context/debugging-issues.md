@@ -60,3 +60,103 @@ The 0.8.37 executor initially could not share a compilation unit with the test-v
 ## Admin surface declaration and economics
 
 The full backend suite caught the newly mounted economic-review route missing from the explicit audited admin path list. The path was added, and all private-authentication/public-schema surface tests passed. A baseline archive initially lacked the Ponder package dependency symlink; after sharing the same complete dependency tree, only the same five existing durability/mock failures remained in both source revisions.
+
+## Arbitrum activation exposed quote-reference starvation
+
+The owner completed the pilot setup on September 29. A read-only check at 04:19:24 UTC found the
+executor unpaused with exactly 5 native USDC, one approved SwapVM strategy and execute mode, but
+79 discarded passes and zero completed passes. Sixteen candidate events were present while the
+headline candidate counter remained zero. This was not evidence that no opportunity existed.
+
+The read/requote lifecycle was checking the previous reference block before the returned quote
+could replace it. A deterministic reproduction started at block 100, returned a quote at 111 with
+head 112, and still refused on the original anchor despite the unchanged eight-block bound.
+Preparatory reads now use an explicit task-liveness check. The actual quote is checked for age,
+canonical block and approvals before adoption. Task expiry, revocation, reorg and stop cannot be
+cleared by adopting a new quote. The chosen SwapVM amount/direction is refreshed once instead of
+running another full adaptive search. Insufficient current inventory returns to discovery.
+
+The final exact-call simulation now supplies its own freshness evidence. Its calldata hash is checked
+before and after signing, and the same configured block/time bounds apply to that proof. This is a
+bounded proof, not a guarantee that no later block or inclusion-time state change can occur. Pending
+nonces, economic controls, full-call execution and onchain minimum-profit checks remain mandatory.
+
+The route's verified native/base-token V3 pool can value gas directly, with same-block factory,
+quoter, token, fee and factory-lookup validation. Every changed native cost is still quoted anew.
+The earlier all-tier search remains for routes without a matching conversion pair; no zero-fee
+fallback or assumed token price was added. Local read-only measurements dropped fee preparation
+from about 27 seconds to about 9 seconds; host-side timing must be checked before release claims.
+
+Candidate counts advance when a validated candidate is found, including candidates later discarded.
+Unavailable SwapVM searches count as failures; they do not emit a successful empty pass. Diagnostic
+reasons are retained with authenticated URLs redacted. No repair code has been activated on the live
+funded worker merely by these source changes.
+
+The tested repair runtime is commit `3e0beaddcdba0a42d6b894242c49bebff987bd99`, with 123 unit
+checks, 47 contract cases, three local transaction integrations and successful push/PR CI. Its
+resource-bounded host build produced image
+`sha256:4ffa8e6394f59a80a1fd2caf84246878db89e974609ae4e6362cc547f3592312`.
+The final isolated host-side live timing probe could not be executed through the tool safety layer.
+It is therefore an explicit prerequisite inside the owner-run image update, not a claimed pass.
+
+`python3 ops/owner-refresh-arbitrum.py --apply` requires an interactive owner and the phrase
+`UPDATE ARBITRUM WORKER`. It first validates the currently staged source/image, then runs a
+read-only whole-call probe without AWS signing credentials or runtime mounts. It leaves the active
+service unchanged if proof freshness or the existing task-time budget fails. A successful owner
+update changes only the image pin and restarts the existing service. Settings, credentials, limits,
+permissions, pauses and runtime data remain intact. If a transaction becomes pending during the stop,
+the helper resumes the old image without deleting it. Rollback never restores old runtime/history
+files over newer execution evidence. Six isolated host-update regressions cover these boundaries.
+
+### Provider skew found after the owner's first repair update
+
+The owner's first image update completed at 04:46 UTC and its isolated exact-call timing probe
+passed in 2.273 seconds. The continuous worker then rejected candidates before fee preparation.
+A separate read-only comparison caught a quote at block 509926684 while the public RPC's latest
+answer was still 509926682. The old generic freshness check treated this ordinary provider skew
+as a stale/reorganized quote, even though the quote endpoint was no-store and returned current data.
+
+`waitForRpcHead` now waits for an actual latest-head response to reach the quote or simulation
+block, bounded by the existing freshness deadline and poll interval. It never substitutes a quoted
+block number for RPC evidence. The ordinary block-lag, time-age and canonical-hash checks still
+follow. A late RPC response, expired budget, cancellation or unreachable future height refuses.
+Transient freshness mismatches are discarded as outdated work rather than inflating the error
+backoff. Genuine failed scans propagate to the scheduler's failure count instead of its success
+count. Three read-only live quote checks verified canonical hashes after alignment; no transaction
+was signed or broadcast by those checks. The owner-run preflight must include the same head alignment
+and quote freshness checks before the next image update.
+
+### First live execution succeeded; receipt event selection prevented recording
+
+The first owner-enabled Arbitrum trade at 04:55:04 UTC succeeded in block 509927826. The actual
+receipt and its prepared record are pinned in `test/fixtures/arbitrum-first-execution.json`.
+It spent 3.871550 USDC and earned 0.704396 USDC gross. Receipt gas was 0.000017603901 ETH.
+The existing backend's mainnet RPC supplied the historical exact-output conversion: 0.046953 USDC
+of gas replacement cost, giving 0.657443 USDC net for this trade. Setup, funding and deployment
+costs are separate from this single-trade result. No LP return or withdrawal was performed.
+
+The receipt contains both `SwapVMLegExecuted` and `Executed`. Passing `eventName` to the existing
+multi-event ABI decoder did not filter its runtime topic selection: the final execution was decoded
+again in the SwapVM branch and rejected as a duplicate/mismatched leg. Separate ABI projections
+now decode each fact. The exact real receipt passes, including when event order changes. Wrong
+identity, missing evidence and duplicate matching events still fail. The worker now exposes receipt
+recording errors instead of reporting this mined hash as generically pending forever.
+
+The ordinary public RPC had already pruned that receipt's historical state when recovery was
+attempted. The existing backend mainnet RPC was read in memory for the exact historical valuation;
+no provider account was created, no live RPC setting was replaced and no authenticated URL was
+published. A temporary local-file run of the compiled recovery command verified preview-only
+behavior, one settled record with the actual net result, and an idempotent second apply.
+
+`src/reconciliation.ts` and `src/receipt-recovery.ts` are receipt-only paths with no runtime import
+of the worker loop, wallet or KMS signer. Recovery binds the hash, chain, sender, executor, nonce,
+prepared trade, canonical block and complete historical fee evidence. It persists history before
+releasing the same pending journal entry, retains existing economic pauses and keeps daily gas
+reservations unchanged. Journal persistence failures no longer clear pending state only in memory.
+
+`ops/owner-reconcile-arbitrum.py` is an owner-confirmed maintenance command. It stops the existing
+worker, preserves a backup, runs the receipt-only process under the runtime flock without signer
+credentials, verifies persisted state and starts the repaired image with the same settings. An
+uncertain recovery leaves the worker stopped; it never deletes pending evidence or restores old
+history over a partial successful settlement. The new runtime still needs its exact-image build
+and owner-applied release before these source fixes describe the live service.
