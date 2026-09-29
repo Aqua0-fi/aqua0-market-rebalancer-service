@@ -145,6 +145,7 @@ export function acceptOptimizedCandidates(
       quoteBlockHash: result.blockHash,
       quotedProfit: q.grossProfit,
       netProfit: q.netProfit,
+      minimumNetProfit: market.minNetProfit,
       aquaFirst: q.aquaFirst,
       trade: {
         id: `0x${randomBytes(32).toString("hex")}`,

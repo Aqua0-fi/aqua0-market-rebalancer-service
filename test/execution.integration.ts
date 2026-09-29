@@ -1,3 +1,4 @@
+import { FeeProfitRefusal } from "../src/live-fees.js";
 /** Local EVM integration for the real offchain signing, simulation, submission and journal path.
  * The mainnet protocol integration is separately covered by contracts/test/MarketRebalancer.fork.t.sol. */
 import test from "node:test";
@@ -163,6 +164,7 @@ for (const signerMode of ["local", "kms"] as const) {
         chainId: 31337,
         feeModel: "gas-limit",
         nativeCurrency: { symbol: "ETH", decimals: 18 },
+        nativeEquivalent: { token: token0, decimals: 18 },
         rpcEnv: "REBALANCER_TEST_RPC",
         publicRpc: url,
         universalRouter: router,
@@ -352,6 +354,80 @@ for (const signerMode of ["local", "kms"] as const) {
           "test-only",
         );
       }
+      const beforeScopeSign = signing.digests.length;
+      await assert.rejects(
+        () =>
+          submit(
+            client,
+            chain,
+            {
+              ...config,
+              execution: {
+                ...config.execution,
+                "31337": {
+                  ...config.execution["31337"]!,
+                  externalPools: [token0],
+                },
+              },
+            },
+            candidate,
+            journal,
+            history,
+            signerMode === "kms" ? signing.transport : undefined,
+          ),
+        /pilot scope/,
+      );
+      assert.equal(signing.digests.length, beforeScopeSign);
+      assert.equal(
+        history.list({ network: "fork", limit: 10 }).matchedCount,
+        0,
+      );
+      const insufficient = {
+        ...candidate,
+        minimumNetProfit: 1n,
+        trade: {
+          ...candidate.trade,
+          minProfit: 1n,
+          second: {
+            ...candidate.trade.second,
+            minOut: candidate.trade.first.amountIn + 1n,
+          },
+        },
+      };
+      const refusedNonce = await client.getTransactionCount({
+        address: account.address,
+      });
+      const refusedSigned = signing.digests.length;
+      await assert.rejects(
+        () =>
+          submit(
+            client,
+            chain,
+            config,
+            insufficient,
+            journal,
+            history,
+            signerMode === "kms" ? signing.transport : undefined,
+          ),
+        FeeProfitRefusal,
+      );
+      assert.equal(
+        signing.digests.length,
+        refusedSigned,
+        "Fee rejection must never sign",
+      );
+      assert.equal(
+        await client.getTransactionCount({ address: account.address }),
+        refusedNonce,
+      );
+      assert.equal(
+        history.list({ network: "fork", limit: 10 }).matchedCount,
+        0,
+      );
+      assert.equal(
+        journal.get(`31337:${account.address.toLowerCase()}`).pending,
+        undefined,
+      );
       const signedBefore = signing.digests.length;
       const hash = await submit(
         client,
@@ -365,6 +441,18 @@ for (const signerMode of ["local", "kms"] as const) {
       assert.equal(
         signing.digests.length - signedBefore,
         signerMode === "kms" ? 1 : 0,
+      );
+      assert(
+        candidate.feeEstimate,
+        "The transmitted call must have an actual fee estimate",
+      );
+      const sent = await client.getTransaction({ hash });
+      assert.equal(sent.gas, candidate.feeEstimate.gas);
+      assert.equal(sent.gasPrice, candidate.feeEstimate.gasPrice);
+      assert.equal(keccak256(sent.input), candidate.feeEstimate.calldataHash);
+      assert(
+        candidate.trade.minProfit >=
+          candidate.feeEstimate.tokenCost + candidate.minimumNetProfit!,
       );
       history.close();
       history = new HistoryStore(join(dir, "history.sqlite"));

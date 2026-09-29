@@ -21,9 +21,21 @@ export async function assertAdditionalFeeReserve(
   reserve: bigint,
   bufferBps: number,
 ): Promise<void> {
+  const actual = await readAdditionalNetworkFees(client, chain, tx);
+  if (ceilDiv(actual * BigInt(bufferBps), 10000n) > reserve)
+    throw new Error("Additional network fees exceed reserved budget");
+}
+
+/** Arbitrum's RPC gas estimate already includes its posting cost. OP fees are read separately. */
+export async function readAdditionalNetworkFees(
+  client: PublicClient,
+  chain: ChainConfig,
+  tx: { to: Address; data: Hex; gas: bigint; gasPrice: bigint; nonce: number },
+  blockNumber?: bigint,
+): Promise<bigint> {
   if (chain.feeModel === "unsupported")
     throw new Error("Network fee model is unsupported");
-  if (chain.feeModel === "gas-limit") return;
+  if (chain.feeModel === "gas-limit") return 0n;
   const unsigned = serializeTransaction({
     ...tx,
     chainId: chain.chainId,
@@ -35,16 +47,19 @@ export async function assertAdditionalFeeReserve(
       abi: feeAbi,
       functionName: "getL1Fee",
       args: [unsigned],
+      ...(blockNumber === undefined ? {} : { blockNumber }),
     }),
     client.readContract({
       address: gasOracle,
       abi: feeAbi,
       functionName: "getOperatorFee",
       args: [tx.gas],
+      ...(blockNumber === undefined ? {} : { blockNumber }),
     }),
   ]);
-  if (ceilDiv((l1 + operator) * BigInt(bufferBps), 10000n) > reserve)
-    throw new Error("Additional network fees exceed reserved budget");
+  if (l1 < 0n || operator < 0n)
+    throw new Error("Invalid additional fee oracle result");
+  return l1 + operator;
 }
 
 /** Convert native gas units to the configured quote token before requesting a market price.

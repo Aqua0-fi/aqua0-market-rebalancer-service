@@ -247,6 +247,10 @@
         "symbol": "ETH",
         "decimals": 18
       },
+      "nativeEquivalent": {
+        "token": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+        "decimals": 18
+      },
       "name": "Arbitrum",
       "rpcEnv": "RPC_URL_MAINNET_ARBITRUM",
       "publicRpc": "https://arb1.arbitrum.io/rpc",

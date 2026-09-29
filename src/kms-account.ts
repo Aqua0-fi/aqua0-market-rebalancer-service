@@ -1,3 +1,5 @@
+import { executorAbi } from "./abi.js";
+import { readAwsSessionFile } from "./aws-session-file.js";
 import { createPublicKey, randomBytes } from "node:crypto";
 import {
   GetPublicKeyCommand,
@@ -6,6 +8,7 @@ import {
 } from "@aws-sdk/client-kms";
 import {
   getAddress,
+  decodeFunctionData,
   hashMessage,
   keccak256,
   recoverAddress,
@@ -84,8 +87,12 @@ function validateConfig(config: KmsAccountConfig): void {
   getAddress(config.address);
 }
 export function awsKmsTransport(region: string): KmsTransport {
+  const credentialFile = process.env.REBALANCER_AWS_CREDENTIALS_FILE;
   const client = new KMSClient({
     region,
+    ...(credentialFile
+      ? { credentials: async () => readAwsSessionFile(credentialFile) }
+      : {}),
     maxAttempts: 2,
     requestHandler: { connectionTimeout: 5000, socketTimeout: 10000 },
   });
@@ -235,6 +242,19 @@ export async function createKmsAccount(
         throw new Error(
           "Worker transaction target is not the configured executor",
         );
+      if (config.target) {
+        let method: string | undefined;
+        try {
+          method = decodeFunctionData({
+            abi: executorAbi,
+            data: transaction.data ?? "0x",
+          }).functionName;
+        } catch {
+          throw new Error("Worker may only sign complete execute calldata");
+        }
+        if (method !== "execute")
+          throw new Error("Worker cannot sign owner setup or withdrawal calls");
+      }
       if (options?.serializer && options.serializer !== serializeTransaction)
         throw new Error("Custom transaction serializers are not supported");
       const signature = await sign(
@@ -244,6 +264,113 @@ export async function createKmsAccount(
         keccak256(serializeTransaction(transaction)),
       );
       return serializeTransaction(transaction, signature);
+    },
+  });
+}
+
+/** Owner-invoked CLI only: one exact reviewed Arbitrum creation, never a worker permission.
+ * The ordinary createKmsAccount still refuses deployments and native transfers.
+ */
+export async function createOwnerDeploymentAccount(
+  config: KmsAccountConfig,
+  reviewedUnsignedHash: Hex,
+  transport: KmsTransport = awsKmsTransport(config.region),
+): Promise<LocalAccount> {
+  if (config.chainId !== 42161 || config.target)
+    throw new Error(
+      "Owner deployment signing is restricted to Arbitrum creation",
+    );
+  if (
+    !/^0x[0-9a-fA-F]{64}$/.test(reviewedUnsignedHash) ||
+    BigInt(reviewedUnsignedHash) === 0n
+  )
+    throw new Error("Missing reviewed deployment transaction identity");
+  const address = await verifiedAddress(config, transport);
+  let used = false;
+  return toAccount({
+    address,
+    async signMessage() {
+      throw new Error("Owner deployment signer cannot sign messages");
+    },
+    async signTypedData() {
+      throw new Error("Owner deployment signer cannot sign typed data");
+    },
+    async signTransaction(transaction, options) {
+      if (transaction.chainId !== 42161)
+        throw new Error("Arbitrum chain is required");
+      if (
+        transaction.type !== "eip1559" ||
+        transaction.to ||
+        (transaction.value ?? 0n) !== 0n ||
+        !transaction.data ||
+        transaction.data === "0x"
+      )
+        throw new Error("Only zero-value contract creation is permitted");
+      if (options?.serializer && options.serializer !== serializeTransaction)
+        throw new Error("Custom transaction serializers are not supported");
+      const digest = keccak256(serializeTransaction(transaction));
+      if (digest.toLowerCase() !== reviewedUnsignedHash.toLowerCase())
+        throw new Error(
+          "Transaction differs from the exact reviewed deployment",
+        );
+      if (used)
+        throw new Error("This deployment signing intent was already used");
+      used = true;
+      return serializeTransaction(
+        transaction,
+        await sign(config, transport, address, digest),
+      );
+    },
+  });
+}
+
+/** One owner-approved call. Not used by the worker and not a reusable account permission. */
+export async function createOwnerCallAccount(
+  config: KmsAccountConfig,
+  reviewedUnsignedHash: Hex,
+  transport: KmsTransport = awsKmsTransport(config.region),
+): Promise<LocalAccount> {
+  if (
+    config.chainId !== 42161 ||
+    !config.target ||
+    BigInt(config.target) === 0n ||
+    !/^0x[0-9a-fA-F]{64}$/.test(reviewedUnsignedHash) ||
+    BigInt(reviewedUnsignedHash) === 0n
+  )
+    throw new Error("An exact reviewed Arbitrum owner call is required");
+  const address = await verifiedAddress(config, transport);
+  let used = false;
+  return toAccount({
+    address,
+    async signMessage() {
+      throw new Error("Owner call signer cannot sign messages");
+    },
+    async signTypedData() {
+      throw new Error("Owner call signer cannot sign typed data");
+    },
+    async signTransaction(transaction, options) {
+      if (
+        transaction.chainId !== 42161 ||
+        transaction.type !== "legacy" ||
+        !transaction.to ||
+        getAddress(transaction.to) !== getAddress(config.target!) ||
+        !transaction.data ||
+        transaction.data === "0x"
+      )
+        throw new Error("Transaction is not the reviewed owner contract call");
+      if (options?.serializer && options.serializer !== serializeTransaction)
+        throw new Error("Custom transaction serializers are unsupported");
+      const digest = keccak256(serializeTransaction(transaction));
+      if (digest.toLowerCase() !== reviewedUnsignedHash.toLowerCase())
+        throw new Error(
+          "Owner transaction differs from the exact reviewed bytes",
+        );
+      if (used) throw new Error("This owner call intent was already used");
+      used = true;
+      return serializeTransaction(
+        transaction,
+        await sign(config, transport, address, digest),
+      );
     },
   });
 }

@@ -7,7 +7,6 @@ import {
   createWalletClient,
   http,
   keccak256,
-  encodeFunctionData,
   type PublicClient,
   type Hex,
 } from "viem";
@@ -15,8 +14,8 @@ import { workerAccount } from "./worker-account.js";
 import type { KmsTransport } from "./kms-account.js";
 import { executorAbi } from "./abi.js";
 import { rpcUrl, same, type ChainConfig, type Settings } from "./config.js";
-import { assertFresh, ceilDiv, type Candidate } from "./strategy.js";
-import { assertAdditionalFeeReserve } from "./fees.js";
+import { assertFresh, type Candidate } from "./strategy.js";
+import { finalizeCandidateFees } from "./live-fees.js";
 import { Journal } from "./state.js";
 import { HistoryStore } from "./history.js";
 import { preparedExecution, executionReceipt } from "./execution-history.js";
@@ -29,7 +28,7 @@ export async function submit(
   history?: HistoryStore,
   kmsTransport?: KmsTransport,
   beforeBroadcast?: (simulation?: { number: bigint; hash: Hex }) => void,
-  onProgress?: (stage: string) => void,
+  onProgress?: (stage: string, details?: Record<string, unknown>) => void,
 ): Promise<Hex> {
   const config = settings.execution[String(chain.chainId)];
   if (settings.mode !== "execute" || !config?.allowBroadcast)
@@ -45,6 +44,17 @@ export async function submit(
   );
   beforeBroadcast?.();
   assertEconomicExecution(history, settings.networkMode);
+  if (
+    config.externalPools &&
+    [candidate.trade.first, candidate.trade.second].some(
+      (leg) =>
+        leg.venue === 1 &&
+        !config.externalPools!.some((pool) => same(pool, leg.target)),
+    )
+  )
+    throw new Error(
+      "External pool is outside the explicitly configured pilot scope",
+    );
   const account = await workerAccount(
     chain.chainId,
     config,
@@ -149,69 +159,11 @@ export async function submit(
         "SwapVM execution is not owner-approved for this strategy/router",
       );
   }
-  const gasPrice = ceilDiv((await client.getGasPrice()) * 120n, 100n);
-  if (gasPrice > config.maxFeePerGas) throw new Error("Gas price cap exceeded");
   const onchainGasCap = await client.readContract({
     address: config.executor,
     abi: executorAbi,
     functionName: "maxGasPrice",
   });
-  if (gasPrice > onchainGasCap)
-    throw new Error("Onchain gas price cap exceeded");
-  const head = await client.getBlock();
-  assertFresh(
-    candidate,
-    head.number,
-    Date.now(),
-    settings.maxQuoteAgeMs,
-    settings.maxBlockLag,
-  );
-  if (candidate.trade.deadline <= head.timestamp + 5n)
-    throw new Error("Authorization near expiry");
-  candidate.trade.validUntilBlock =
-    (await client.readContract({
-      address: config.executor,
-      abi: executorAbi,
-      functionName: "executionBlockNumber",
-      blockNumber: head.number,
-    })) + 2n;
-  onProgress?.("simulating");
-  // Simulate the entire atomic cycle, including the final balance-based profit assertion.
-  await client.simulateContract({
-    address: config.executor,
-    abi: executorAbi,
-    functionName: "execute",
-    args: [candidate.trade],
-    account,
-    gasPrice,
-    blockNumber: head.number,
-  });
-  const data = encodeFunctionData({
-    abi: executorAbi,
-    functionName: "execute",
-    args: [candidate.trade],
-  });
-  const gas = ceilDiv(
-    (await client.estimateGas({
-      account,
-      to: config.executor,
-      data,
-      gasPrice,
-    })) * 120n,
-    100n,
-  );
-  if (gas > config.maxGasUnits) throw new Error("Gas unit cap exceeded");
-
-  const latest = await client.getBlock();
-  assertFresh(
-    candidate,
-    latest.number,
-    Date.now(),
-    settings.maxQuoteAgeMs,
-    settings.maxBlockLag,
-  );
-  if ((await client.getBlock({ blockNumber: head.number })).hash !== head.hash)
-    throw new Error("Simulation block reorged");
   const nonce = await client.getTransactionCount({
     address: account.address,
     blockTag: "pending",
@@ -224,43 +176,86 @@ export async function submit(
     }))
   )
     throw new Error("Operator already has a pending nonce");
-  await assertAdditionalFeeReserve(
-    client,
-    chain,
-    { to: config.executor, data, gas, gasPrice, nonce },
-    config.l1FeeReserveWei,
-    config.gasCostBufferBps,
-  );
-  const signingHead = await client.getBlock();
-  assertFresh(
-    candidate,
-    signingHead.number,
-    Date.now(),
-    settings.maxQuoteAgeMs,
-    settings.maxBlockLag,
-  );
-  if (candidate.trade.deadline <= signingHead.timestamp + 5n)
-    throw new Error("Authorization near expiry before signing");
-  // If the chain moved during gas/nonce checks, verify the exact transaction again at the new
-  // state. This includes shared vault backing and both venues, not just the selected pool price.
-  if (signingHead.hash !== head.hash) {
-    await client.simulateContract({
+  let head = await client.getBlock();
+  const checkQuote = (current: typeof head) => {
+    assertFresh(
+      candidate,
+      current.number,
+      Date.now(),
+      settings.maxQuoteAgeMs,
+      settings.maxBlockLag,
+    );
+    if (candidate.trade.deadline <= current.timestamp + 5n)
+      throw new Error("Authorization near expiry");
+  };
+  checkQuote(head);
+  candidate.trade.validUntilBlock =
+    (await client.readContract({
       address: config.executor,
       abi: executorAbi,
-      functionName: "execute",
-      args: [candidate.trade],
-      account,
-      gasPrice,
-      gas,
-      blockNumber: signingHead.number,
-    });
-    if (
-      (await client.getBlock({ blockNumber: signingHead.number })).hash !==
-      signingHead.hash
-    )
-      throw new Error("Latest execution simulation reorganized");
+      functionName: "executionBlockNumber",
+      blockNumber: head.number,
+    })) + 2n;
+  onProgress?.("simulating");
+  let fees = await finalizeCandidateFees(
+    client,
+    chain,
+    config,
+    candidate,
+    head,
+    nonce,
+    limit[1],
+    onchainGasCap,
+  );
+  const signingHead = await client.getBlock();
+  checkQuote(signingHead);
+  // A changed state requires a new whole-call estimate, conversion and simulation, not just old math.
+  if (signingHead.hash !== head.hash) {
+    head = signingHead;
+    candidate.trade.validUntilBlock =
+      (await client.readContract({
+        address: config.executor,
+        abi: executorAbi,
+        functionName: "executionBlockNumber",
+        blockNumber: head.number,
+      })) + 2n;
+    fees = await finalizeCandidateFees(
+      client,
+      chain,
+      config,
+      candidate,
+      head,
+      nonce,
+      limit[1],
+      onchainGasCap,
+    );
   }
-  const simulatedAt = { number: signingHead.number, hash: signingHead.hash };
+  checkQuote(await client.getBlock());
+  if (
+    (await client.getTransactionCount({
+      address: account.address,
+      blockTag: "pending",
+    })) !== nonce ||
+    (await client.getTransactionCount({
+      address: account.address,
+      blockTag: "latest",
+    })) !== nonce
+  )
+    throw new Error("Operator nonce changed during fee estimation");
+  const { data, gas, gasPrice } = fees;
+  const simulatedAt = { number: fees.blockNumber, hash: fees.blockHash };
+  onProgress?.("fee_estimated", {
+    gasUnits: gas,
+    gasPrice,
+    additionalNative: fees.additionalNative,
+    nativeCost: fees.nativeCost,
+    tokenCost: fees.tokenCost,
+    blockNumber: fees.blockNumber,
+    blockHash: fees.blockHash,
+    calldataHash: fees.calldataHash,
+    estimatedNetProfit: candidate.netProfit,
+    conversionPool: fees.conversionPool,
+  });
   const wallet = createWalletClient({
     account,
     transport: http(rpcUrl(chain)),
@@ -289,7 +284,10 @@ export async function submit(
     hash,
     nonce,
     candidate.trade.id,
-    gas * gasPrice + config.l1FeeReserveWei,
+    // Exposure reservation is not the cost used to decide profit. Preserve an OP extra-fee
+    // ceiling for the daily-spend meter; Arbitrum posting fees are already in estimated gas.
+    gas * gasPrice +
+      (chain.feeModel === "op-stack" ? config.l1FeeReserveWei : 0n),
     config.maxDailyGasWei,
     history !== undefined,
   );

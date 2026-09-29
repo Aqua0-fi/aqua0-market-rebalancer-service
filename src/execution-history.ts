@@ -34,7 +34,8 @@ export function preparedExecution(
       nativeCurrency: chain.nativeCurrency ?? null,
       nativeEquivalent: chain.nativeEquivalent ?? null,
       wrappedNative: config.wrappedNative,
-      gasConversionFee: config.gasConversionFee,
+      gasConversionFee:
+        candidate.feeEstimate?.conversionFee ?? config.gasConversionFee,
       venues: chain.venues.map((v) => ({
         factory: v.factory,
         quoter: v.quoter,

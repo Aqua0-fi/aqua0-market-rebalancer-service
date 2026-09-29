@@ -51,7 +51,7 @@ env.update(
 )
 start = time.monotonic()
 result = subprocess.run(
-    ["forge", "test", "--match-path", "**/*.fork.t.sol", "-vv"],
+    ["forge", "test", "--match-path", "contracts/test/MarketRebalancer.fork.t.sol", "-vv"],
     env=env,
     text=True,
     stdout=subprocess.PIPE,

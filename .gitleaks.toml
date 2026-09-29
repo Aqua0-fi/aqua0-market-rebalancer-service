@@ -12,3 +12,22 @@ regexes = [
   '''(?i)^0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913$''',
   '''(?i)^0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2$''',
 ]
+
+# Actual Arbitrum WETH/native-USDC contract addresses independently read at the
+# captured fork blocks; path AND exact public address must match. No keys ignored.
+[[allowlists]]
+description = "Verified public Arbitrum token identities in pilot and fork records"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^config/(arbitrum-pilot|observed-opportunity-arbitrum-fork|owner-pilot-funding-fork|production-maker-arbitrum-fork)\.json$''']
+regexes = [
+  '''(?i)^0xaf88d065e77c8cC2239327C5EDb3A432268e5831$''',
+  '''(?i)^0x82aF49447D8a07e3bd95BD0d56f35241523fBab1$''',
+]
+
+[[allowlists]]
+description = "Canonical Arbitrum WETH identity in generated chain registry"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^config/chains\.json$''']
+regexes = ['''(?i)^0x82aF49447D8a07e3bd95BD0d56f35241523fBab1$''']

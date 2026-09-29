@@ -11,13 +11,16 @@ does not manufacture trades when there is no economic opportunity.
 2. It selects a size from prepared V4/V3 liquidity curves or fresh actual SwapVM quotes, comparing
    both venue orders within your spending, backing, fee and minimum-profit limits. There is no
    manually configured sample-size list on the current search path.
-3. It applies a slippage margin and reserves a conservative fee budget, including additional rollup
-   charges where applicable. A user-configured minimum net profit must remain after that budget.
+3. It screens price curves with a slippage margin. These exploratory results are gross candidates,
+   not verified profit after gas. Only the selected executable transaction receives a fee estimate.
 4. It recalculates the selected opportunity using current shared backing and external-pool prices.
    For V4 it then asks Aqua0 to authorize the exact JIT fill. For SwapVM it verifies the current,
    already-shipped order and explicit onchain permissions. No per-swap V4 authorization is invented
    for a SwapVM program.
-5. It simulates the _whole_ transaction, including both swaps and the contract's final profit check.
+5. It estimates and simulates the _whole_ transaction, including both swaps and the profit guard.
+   Live gas price plus the owner-requested 5% margin, actual estimated gas units and any separately
+   quoted network fees are converted through a real exact-output native-token quote. The complete
+   transaction is re-estimated after its profit floor changes; unknown fees refuse submission.
 6. The executor exchanges the starting token for the intermediate token, exchanges that token back,
    and checks its final starting-token balance before returning successfully.
 
@@ -31,8 +34,9 @@ The contract reads its starting-token balance before trading. It requires:
 
 `balance after both swaps >= balance before both swaps + required gross profit`
 
-The service chooses `required gross profit` to cover a conservative fee budget plus its required net
-profit. An owner-configured onchain minimum is an additional floor the operator cannot lower.
+The service chooses `required gross profit` to cover the selected transaction's measured fee estimate
+plus its required net profit. An owner-configured onchain minimum is an additional floor the operator
+cannot lower. Maximum gas and spending settings are safety ceilings, not assumed transaction costs.
 
 For example, suppose a cycle starts with 1,000 USDC, reserves 2 USDC worth of fees and requires 3 USDC
 of net profit. The contract must finish at least 5 USDC above its starting balance. Returning only
@@ -53,11 +57,13 @@ A transaction that is included and reverts still costs network fees. It cannot r
 fee payment. A profitable token cycle also needs to pay fees from the operator's separate native-token
 balance. Profit is therefore not inferred merely from seeing two successful swaps.
 
-The service caps the transaction's gas units and gas price, checks a second owner-set gas price cap
-onchain, reserves worst-budgeted execution fees, checks OP Stack L1/operator fees against an extra
-reserve, and stops when its daily fee budget or failure threshold is exhausted. Fee conversion into
-the starting token uses a real external quote with a buffer. Additional fees and conversion prices can
-change before inclusion, so these are conservative controls, not an absolute guarantee of zero fee loss.
+The service caps gas units and gas price and checks a second owner-set gas-price ceiling onchain.
+Profitability uses the actual complete-call estimate, not those ceilings. Arbitrum's gas estimate
+already includes posting cost. OP Stack L1/operator charges are separately read, buffered and checked
+against their configured ceiling. The journal reserves exposure before sending; this spending meter is
+separate from the cost used to rank profitability. Actual mined receipts, including reversions, drive
+realized P&L and the durable economic pause. Unknown or negative economics are not silently cleared.
+Fee state and prices can change before inclusion: an estimate is not a guarantee against gas loss.
 
 A simulation is a rehearsal against a particular state, not a promise that later state will be identical.
 The contract's balance check is the final authority. Short expiry, fresh quotes and preflight simulation
