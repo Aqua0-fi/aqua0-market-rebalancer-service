@@ -164,3 +164,7 @@ and owner-applied release before these source fixes describe the live service.
 ## 2026-10-01: a healthy loop is not an eligible V4 market
 
 The Arbitrum USDC/DAI pool feed recovered from earlier indexer timeouts, but the worker still had no eligible V4 policy. The prior loop returned successfully without pricing anything and advanced `lastSuccess`. The isolated idle-status patch now reports a skipped check; it does not enable pools or change execution. See `v4-usdc-dai-readiness-20261001.md` for exact identity, remaining consent/allowlists, preserved original history work and the disabled configuration draft.
+
+## October 1: observation modules existed but never ran
+
+The original history work had a store and sampler, but the CLI never constructed or started them and the report server exposed neither. The continuation wires startup, authenticated GET reads and cancellation-safe shutdown. It also fixes balance-series filters, false-success sampling status, missing DAI discovery assets, and mutable post-broadcast observation identity. None of these changes replaces the execution journal, authorizes a trade or enables a route. Focused tests cover storage failure, disabled mode, network isolation, authentication, genuine zero versus unavailable balances, stable coverage, truncation and shutdown.

@@ -12,6 +12,7 @@ import type { Server } from "node:http";
 import { HistoryStore } from "./history.js";
 import { SwapVMMarketCatalog } from "./swapvm-catalog.js";
 import { MarketCatalog } from "./market-catalog.js";
+import { createObservationRuntime } from "./observation-runtime.js";
 import { createReportServer } from "./reporting.js";
 import { parseArgs } from "node:util";
 import { loadChains, loadSettings } from "./config.js";
@@ -136,6 +137,7 @@ if (command === "doctor") {
     headers["X-Caller-Token"] = process.env.AQUA0_CALLER_TOKEN;
   const release = acquireLock("runtime/worker.lock");
   let history: HistoryStore | undefined;
+  let observations: ReturnType<typeof createObservationRuntime> | undefined;
   let catalog: MarketCatalog | undefined;
   let swapVMCatalog: SwapVMMarketCatalog | undefined;
   let server: Server | undefined;
@@ -171,6 +173,21 @@ if (command === "doctor") {
       settings.networkMode,
       chains.map((c) => c.chainId),
     );
+    observations = createObservationRuntime({
+      settings,
+      chains,
+      path: "runtime/observations.sqlite",
+      assets: (chain) =>
+        catalog
+          ?.list()
+          .markets.filter(
+            (market) => market.chainId === chain.chainId && market.present,
+          )
+          .flatMap((market) => [
+            market.pool.currency0,
+            market.pool.currency1,
+          ]) ?? [],
+    });
     const runner = new Runner(
       chains,
       settings,
@@ -180,6 +197,7 @@ if (command === "doctor") {
       catalog,
       swapVMCatalog,
       controls,
+      observations.store,
     );
     if (command === "run") {
       const reviewClient = receiptReviewClients(registeredChains, clientFor);
@@ -218,7 +236,17 @@ if (command === "doctor") {
           }
         },
         history,
-        status: () => runner.reportingStatus(),
+        observations: observations.store,
+        status: () => {
+          const status = runner.reportingStatus();
+          return {
+            ...status,
+            observationHistory: {
+              ...observations!.status(),
+              writerIssue: status.observationHistory.issue,
+            },
+          };
+        },
         health: () => ({
           healthy:
             Date.now() - runner.metrics.lastHeartbeat <
@@ -234,12 +262,14 @@ if (command === "doctor") {
         server!.once("error", reject);
         server!.listen(port, host, resolve);
       });
+      observations.start();
     }
     if (command === "scan") await runner.scan();
     else await runReactive(runner, chains, settings, shutdown.signal);
   } finally {
     if (server?.listening)
       await new Promise<void>((resolve) => server!.close(() => resolve()));
+    await observations?.stop();
     history?.close();
     catalog?.close();
     swapVMCatalog?.close();

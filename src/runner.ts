@@ -1,3 +1,4 @@
+import { ObservationStore, type OpportunityUpdate } from "./observations.js";
 import { StaleCandidateError } from "./freshness.js";
 import { safeError } from "./diagnostics.js";
 import { FeeProfitRefusal } from "./live-fees.js";
@@ -91,6 +92,60 @@ export class Runner {
     amount: string | null;
   }[] = [];
   private activitySequence = 0;
+  private observationIssue: string | null = null;
+  private observe(action: (store: ObservationStore) => void) {
+    if (!this.observations) return;
+    try {
+      action(this.observations);
+      this.observationIssue = null;
+    } catch {
+      this.observationIssue =
+        "Observation history could not be persisted; transaction accounting remains separate";
+    }
+  }
+  private updateObservation(choice: ReadyChoice, change: OpportunityUpdate) {
+    this.observe((store) =>
+      store.update(
+        this.settings.networkMode,
+        choice.market.chainId,
+        choice.candidate.trade.id,
+        change,
+      ),
+    );
+  }
+  private executionProgress(
+    choice: ReadyChoice,
+    candidate: Candidate,
+    chainId: number,
+    stage: string,
+    details?: Record<string, unknown>,
+  ) {
+    if (
+      stage === "fee_estimated" &&
+      details?.tokenCost !== undefined &&
+      details.estimatedNetProfit !== undefined
+    )
+      this.updateObservation(choice, {
+        estimatedFee: String(details.tokenCost),
+        estimatedNet: String(details.estimatedNetProfit),
+        executionAmountIn: String(candidate.trade.first.amountIn),
+        executionTradeId: candidate.trade.id,
+      });
+    if (
+      stage === "broadcasting" &&
+      typeof details?.transactionHash === "string"
+    )
+      this.updateObservation(choice, {
+        state: "transaction-prepared",
+        transactionHash: details.transactionHash,
+        executionTradeId: candidate.trade.id,
+        executionAmountIn: String(candidate.trade.first.amountIn),
+        reason:
+          "Transaction persisted before broadcast; confirm its result in trade history",
+      });
+    this.event(stage, { chainId, ...details });
+  }
+
   private stages = new Map<number, { stage: string; since: string }>();
   private event(event: string, data: Record<string, unknown> = {}) {
     log(event, data);
@@ -222,6 +277,7 @@ export class Runner {
     private readonly catalog?: MarketCatalog,
     private readonly swapVMCatalog?: SwapVMMarketCatalog,
     private readonly controls?: RuntimeControls,
+    private readonly observations?: ObservationStore,
   ) {
     if (settings.discovery.enabled && !catalog)
       throw new Error("Discovery needs a persistent market catalog");
@@ -276,6 +332,10 @@ export class Runner {
       economics: this.history?.economics(this.settings.networkMode) ?? null,
       recentActivity: [...this.activity].reverse(),
       searchQueue: this.aqua.searchStatus(),
+      observationHistory: {
+        available: !!this.observations,
+        issue: this.observationIssue,
+      },
       chains: this.chains.map((chain) => ({
         chainId: chain.chainId,
         name: chain.name,
@@ -485,6 +545,49 @@ export class Runner {
       }
       check();
       choices.push(choice);
+      this.observe((store) =>
+        store.found({
+          id: choice.candidate.trade.id,
+          network: this.settings.networkMode,
+          chainId,
+          venue: choice.kind,
+          marketId:
+            choice.kind === "aqua"
+              ? choice.market.stableStrategyId
+              : choice.pool.poolId,
+          classId: String(choice.market.classId),
+          caller:
+            execution?.executor ??
+            this.settings.quoteFees[String(chainId)]?.caller ??
+            null,
+          baseToken: choice.startToken,
+          otherToken: choice.candidate.trade.first.tokenOut,
+          externalPool: choice.external.address,
+          aquaFirst: choice.candidate.aquaFirst,
+          amountIn: String(choice.candidate.trade.first.amountIn),
+          executionAmountIn: null,
+          quotedGross: String(choice.candidate.quotedProfit),
+          conservativeGross: String(
+            choice.candidate.trade.second.minOut -
+              choice.candidate.trade.first.amountIn,
+          ),
+          estimatedFee: choice.candidate.feeEstimate
+            ? String(choice.candidate.feeEstimate.tokenCost)
+            : null,
+          estimatedNet: choice.candidate.feeEstimate
+            ? String(choice.candidate.netProfit)
+            : null,
+          quoteBlock: String(choice.candidate.blockNumber),
+          quoteBlockHash: choice.candidate.quoteBlockHash,
+          foundAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          quoteObservedAt: new Date(choice.candidate.quotedAt).toISOString(),
+          state: "found",
+          reason: null,
+          transactionHash: null,
+          executionTradeId: null,
+        }),
+      );
       this.metrics.candidates++;
       executionQueue?.offer(choice);
       this.event("opportunity_ready", {
@@ -656,7 +759,19 @@ export class Runner {
       vmContext ? collectSwapVMChoices(vmContext) : Promise.resolve([]),
     ]);
     // Started reads are drained even if sending fails, so no late callback can launch a second account lane.
-    const accepted = await executionQueue?.settle();
+    let accepted: ReadyChoice | undefined;
+    try {
+      accepted = await executionQueue?.settle();
+    } finally {
+      this.observe((store) =>
+        store.finishFound(
+          this.settings.networkMode,
+          chainId,
+          choices.map((c) => c.candidate.trade.id),
+          this.settings.mode,
+        ),
+      );
+    }
     if (!accepted) {
       check();
       const error = reads.find(
@@ -682,10 +797,39 @@ export class Runner {
     choice: ReadyChoice,
     task?: ScanTask,
   ): Promise<boolean> {
+    this.updateObservation(choice, { state: "rechecking", reason: null });
     try {
-      return await this.executePricedChoice(chain, client, choice, task);
+      const result = await this.executePricedChoice(
+        chain,
+        client,
+        choice,
+        task,
+      );
+      if (!result)
+        this.updateObservation(choice, {
+          state: "disappeared",
+          reason:
+            "The selected amount or direction was no longer available during recheck",
+        });
+      return result;
     } catch (error) {
-      if (!(error instanceof FeeProfitRefusal)) throw error;
+      if (!(error instanceof FeeProfitRefusal)) {
+        this.updateObservation(choice, {
+          state:
+            error instanceof ObsoleteScan ||
+            error instanceof StaleCandidateError
+              ? "stale"
+              : "blocked",
+          reason: safeError(error),
+        });
+        throw error;
+      }
+      this.updateObservation(choice, {
+        state: "unprofitable",
+        reason: "The candidate did not cover measured fees and required profit",
+        estimatedFee: String(error.tokenCost),
+        estimatedNet: String(error.conservativeGross - error.tokenCost),
+      });
       this.event("fee_unprofitable", {
         chainId: chain.chainId,
         venue: choice.kind,
@@ -764,8 +908,17 @@ export class Runner {
             task?.bindExecutionSnapshot(snapshot.number, snapshot.hash);
           vmContext.catalog.assertApproved(choice.market, choice.policy);
         },
-        (stage, details) => this.event(stage, { chainId, ...details }),
+        (stage, details) =>
+          this.executionProgress(choice, refreshed, chainId, stage, details),
       );
+      this.updateObservation(choice, {
+        state: "submitted",
+        transactionHash: hash,
+        executionTradeId: refreshed.trade.id,
+        executionAmountIn: String(refreshed.trade.first.amountIn),
+        reason:
+          "Broadcast acknowledged; confirmed outcome belongs to transaction history",
+      });
       this.metrics.submitted++;
       this.event("submitted", { chainId, hash, venue: "aqua" });
       return true;
@@ -865,8 +1018,17 @@ export class Runner {
           task?.bindExecutionSnapshot(snapshot.number, snapshot.hash);
         this.assertMarketApproval(market);
       },
-      (stage, details) => this.event(stage, { chainId, ...details }),
+      (stage, details) =>
+        this.executionProgress(choice, candidate, chainId, stage, details),
     );
+    this.updateObservation(choice, {
+      state: "submitted",
+      transactionHash: hash,
+      executionTradeId: candidate.trade.id,
+      executionAmountIn: String(candidate.trade.first.amountIn),
+      reason:
+        "Broadcast acknowledged; confirmed outcome belongs to transaction history",
+    });
     this.metrics.submitted++;
     this.event("submitted", { chainId, hash });
     return true;

@@ -338,7 +338,10 @@ export async function submit(
     config.maxDailyGasWei,
     history !== undefined,
   );
-  onProgress?.("broadcasting");
+  onProgress?.("broadcasting", {
+    transactionHash: hash,
+    tradeId: candidate.trade.id,
+  });
   await client.sendRawTransaction({ serializedTransaction: signed });
   history?.acknowledgeBroadcast(settings.networkMode, chain.chainId, hash);
   return hash;

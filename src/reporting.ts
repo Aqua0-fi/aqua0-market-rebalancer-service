@@ -8,6 +8,8 @@ import {
 import { createHash, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { HistoryStore, historyQuerySchema } from "./history.js";
+import type { ObservationStore } from "./observations.js";
+import { observationQuerySchema } from "./observation-wire.js";
 import type { SwapVMMarketCatalog } from "./swapvm-catalog.js";
 import { MarketCatalog, marketPolicyInput } from "./market-catalog.js";
 
@@ -23,6 +25,7 @@ export interface ReportOptions {
   catalog?: MarketCatalog | undefined;
   swapVMCatalog?: SwapVMMarketCatalog | undefined;
   hostHealth?: (() => unknown) | undefined;
+  observations?: ObservationStore | undefined;
   history: HistoryStore;
   status: () => unknown;
   health: () => { healthy: boolean; metrics: unknown };
@@ -38,7 +41,7 @@ function send(res: ServerResponse, code: number, value: unknown): void {
   );
 }
 
-/** Report reads and explicit policy writes use distinct credentials; neither can activate trading. */
+/** Report reads cannot change permissions. Policy writes have separate credentials and can make a route eligible on an already-enabled worker. */
 export function createReportServer(options: ReportOptions) {
   if (
     options.token !== undefined &&
@@ -324,6 +327,34 @@ export function createReportServer(options: ReportOptions) {
         });
         return;
       }
+      if (
+        url.pathname === "/v1/opportunities" ||
+        url.pathname === "/v1/balances"
+      ) {
+        if (!options.observations) {
+          send(res, 503, {
+            error: "Observation history is disabled or unavailable",
+          });
+          return;
+        }
+        const supplied = Object.fromEntries(url.searchParams);
+        if (supplied.network && supplied.network !== options.network) {
+          send(res, 400, { error: "Reporting network mismatch" });
+          return;
+        }
+        const query = observationQuerySchema.parse({
+          ...supplied,
+          network: options.network,
+        });
+        send(
+          res,
+          200,
+          url.pathname === "/v1/opportunities"
+            ? options.observations.opportunities(query)
+            : options.observations.balances(query),
+        );
+        return;
+      }
       if (url.pathname === "/v1/executions") {
         const supplied = Object.fromEntries(url.searchParams);
         if (supplied.network && supplied.network !== options.network) {
@@ -360,11 +391,13 @@ export function createReportServer(options: ReportOptions) {
         error instanceof z.ZodError ||
         error instanceof SyntaxError ||
         (error instanceof Error &&
-          error.message.startsWith("Invalid history cursor"));
+          (error.message.startsWith("Invalid history cursor") ||
+            error.message.startsWith("Invalid observation cursor") ||
+            error.message.startsWith("Filters do not belong")));
       send(res, invalid ? 400 : 503, {
         error: invalid
           ? "Invalid reporting query"
-          : "Execution history unavailable",
+          : "Requested reporting history is unavailable",
       });
     }
   });

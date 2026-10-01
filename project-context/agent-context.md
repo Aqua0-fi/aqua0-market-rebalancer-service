@@ -61,3 +61,7 @@ bounded per-chain quote concurrency, queued-state invalidation and latest-state 
 Pool caches retain verified math data, not LP approvals or available shared backing. Global/per-chain
 pause controls and live reporting are implemented but not deployed merely by being present in source.
 Read `reactive-loop-plan.md` and the release evidence before continuing or making performance claims.
+
+## October 1, 2026 observation continuation
+
+Reviewed copies of the existing uncommitted history feature are integrated with CLI startup/shutdown and authenticated GET reporting. See `observation-history-20261001.md` for scope, tests, diagnostics-only durability and deployment limitations. The original `working-dir/rebalancer-readiness-20260928/worker-review` checkout remains untouched. USDC/DAI route configuration remains disabled; see `v4-usdc-dai-readiness-20261001.md` rather than mistaking code publication for live trading activation.

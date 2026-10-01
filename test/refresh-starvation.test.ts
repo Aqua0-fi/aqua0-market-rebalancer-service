@@ -601,3 +601,95 @@ test("failed scans do not inflate the scheduler's successful completion counter"
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a discovered candidate remains in durable history when the mandatory refresh becomes stale", async () => {
+  const { ObservationStore } = await import("../src/observations.js");
+  const f = fixture(),
+    dir = mkdtempSync(join(tmpdir(), "durable-opportunity-")),
+    history = new HistoryStore(":memory:"),
+    observations = new ObservationStore(":memory:");
+  let requests = 0;
+  const aqua = {
+    optimizeSwapVM: async (r: SwapVMSizingRequest) => {
+      if (++requests === 2) throw new ObsoleteScan("changed while refreshing");
+      return f.result(100, r);
+    },
+    searchStatus: () => ({
+      active: 0,
+      queued: 0,
+      limit: 4,
+      perChainLimit: 2,
+      selectedTradeChecksQueued: 0,
+    }),
+  } as unknown as AquaClient;
+  class OfflineRunner extends Runner {
+    override client() {
+      return f.client;
+    }
+  }
+  const runner = new OfflineRunner(
+    [f.chain],
+    f.settings,
+    aqua,
+    new Journal(join(dir, "journal.json")),
+    history,
+    undefined,
+    f.catalog,
+    undefined,
+    observations,
+  );
+  try {
+    await assert.rejects(() => runner.scanLatest(42161), ObsoleteScan);
+    const page = observations.opportunities({ network: "fork" });
+    assert.equal(page.matchedCount, 1);
+    assert.equal(page.items[0]!.state, "stale");
+    assert.equal(page.items[0]!.estimatedNet, null);
+    assert.equal(page.items[0]!.transactionHash, null);
+  } finally {
+    history.close();
+    observations.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an idle chain with no quoteable approved market is not reported as a completed price search", async () => {
+  const f = fixture(),
+    dir = mkdtempSync(join(tmpdir(), "no-eligible-route-"));
+  const catalog = {
+    ...f.catalog,
+    list: () => ({ markets: [] }),
+  } as unknown as SwapVMMarketCatalog;
+  const aqua = {
+    searchStatus: () => ({
+      active: 0,
+      queued: 0,
+      limit: 4,
+      perChainLimit: 2,
+      selectedTradeChecksQueued: 0,
+    }),
+  } as unknown as AquaClient;
+  class OfflineRunner extends Runner {
+    override client() {
+      return f.client;
+    }
+  }
+  const runner = new OfflineRunner(
+    [f.chain],
+    f.settings,
+    aqua,
+    new Journal(join(dir, "journal.json")),
+    new HistoryStore(":memory:"),
+    undefined,
+    catalog,
+  );
+  try {
+    assert.equal(await runner.scanLatest(42161), false);
+    assert.equal(runner.metrics.lastSuccess, 0);
+    assert.equal(
+      runner.reportingStatus().chains[0]!.activity!.stage,
+      "Waiting for an eligible approved market",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

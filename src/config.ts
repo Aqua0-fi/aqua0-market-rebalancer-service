@@ -88,6 +88,18 @@ const quoteFeeSchema = z
   })
   .strict();
 export const settingsSchema = z.object({
+  observations: z
+    .object({
+      enabled: z.boolean().default(true),
+      balanceIntervalMs: z
+        .number()
+        .int()
+        .min(30000)
+        .max(3600000)
+        .default(60000),
+      maxRecords: z.number().int().min(1000).max(1000000).default(200000),
+    })
+    .prefault({}),
   scheduling: z
     .object({
       headerPollMs: z.number().int().min(100).max(10000).default(500),
