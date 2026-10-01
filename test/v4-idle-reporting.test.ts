@@ -140,22 +140,23 @@ for (const state of ["unapproved", "degraded", "absent"] as const) {
   });
 }
 
-// Validate the checked-in draft through the real parser and a LOCAL in-memory catalog.
-test("USDC/DAI review draft is valid but cannot activate a market", () => {
+// A known Aqua-bound class must never be supplied as a guessed V4 policy.
+test("USDC/DAI readiness record cannot activate the withdrawn class-10 route", () => {
   const draft = JSON.parse(
-    readFileSync("config/arbitrum-usdc-dai-policy.disabled.json", "utf8"),
+    readFileSync("config/arbitrum-usdc-dai-readiness.json", "utf8"),
   );
   const catalog = new MarketCatalog(":memory:", "mainnet", [chain]);
   try {
     catalog.recordListing(chain, listing());
-    const saved = catalog.setPolicy(42161, id, draft, "local-draft-validation");
-    assert.equal(saved.approved, false);
-    assert.equal(saved.classId, "10");
-    assert.equal(saved.maxInput, "5000000");
-    assert.equal(saved.minNetProfit, "10000");
-    assert.deepEqual(saved.amounts, []);
+    assert.equal(draft.approved, false);
+    assert.equal(draft.classId, null);
+    assert.equal(draft.withdrawnClassId, "10");
+    assert.equal(draft.status, "blocked-missing-v4-class");
+    assert.throws(() =>
+      catalog.setPolicy(42161, id, draft, "local-readiness-validation"),
+    );
     assert.equal(catalog.activeMarkets().length, 0);
-    assert.equal(catalog.list().markets[0]!.readyToQuote, false);
+    assert.equal(catalog.list().markets[0]!.policy, null);
   } finally {
     catalog.close();
   }

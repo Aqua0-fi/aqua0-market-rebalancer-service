@@ -1,3 +1,15 @@
+# Correction: do not use class 10 for the V4 route
+
+The earlier class-10 draft below is WITHDRAWN. The live, complete class-venue reader proves class 10 is an Aqua/SwapVM constant-product USDC/DAI strategy at 30 bps (0.3%). The app enforces one venue per class. Class 12 has no active venue binding; it is not a verified alternative V4 class. Pair matching and available backing were insufficient evidence to choose class 10. No approval or live policy was changed by this investigation.
+
+The target is still the user's exact Uniswap V4 USDC/DAI 0.01% pool, `0x1f7d6bb891093beb90fb3802388282e1d2fea68118c3220d902c7a8e207b5f15`, spacing 1. The embedded signer `0xDe2cCfDE6E453E11Cb000BcaFf46FeB01a4b7138` controls LP smart wallet `0xa58c8abde99e90c2ed07c7a9f79f5c0180a2903f`, verified through its root ECDSA validator. That wallet has a saved preference for this exact pool, ticks 275811 to 276812, for 4.991830 USDC and 4.971721655622568565 DAI. Its on-chain free principal matches those amounts. These pool preferences are not a class-10 allocation.
+
+The executable-shaped draft has been removed. `config/arbitrum-usdc-dai-readiness.json` now records `classId: null`, `approved: false` and the missing verified V4 class binding. It deliberately fails the market-policy parser. Do not replace null with a guessed class or approve class 10; resolve the actual V4 class/venue and liquidity path first.
+
+The following earlier audit is retained as historical evidence, not activation instructions. References to choosing class 10 or requesting its V4 approval are superseded by this correction.
+
+---
+
 # Arbitrum USDC/DAI readiness - 2026-10-01
 
 ## Scope and safety
