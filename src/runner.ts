@@ -1,3 +1,4 @@
+import { verifyV4Quote } from "./v4-quote-state.js";
 import { StaleCandidateError } from "./freshness.js";
 import { safeError } from "./diagnostics.js";
 import { FeeProfitRefusal } from "./live-fees.js";
@@ -19,7 +20,7 @@ import {
   type ExternalPool,
 } from "./venues.js";
 import { findPool, same, type ChainConfig, type Settings } from "./config.js";
-import { ceilDiv, assertFresh, type Candidate } from "./strategy.js";
+import { ceilDiv, type Candidate } from "./strategy.js";
 import { submit } from "./execution.js";
 import { reconcile } from "./reconciliation.js";
 import { Journal } from "./state.js";
@@ -570,21 +571,11 @@ export class Runner {
                   })),
                 });
                 for (const candidate of optimized.candidates) {
-                  assertFresh(
-                    candidate,
-                    await client.getBlockNumber(),
-                    Date.now(),
-                    this.settings.maxQuoteAgeMs,
-                    this.settings.maxBlockLag,
-                  );
-                  if (
-                    (
-                      await client.getBlock({
-                        blockNumber: candidate.blockNumber,
-                      })
-                    ).hash !== candidate.quoteBlockHash
-                  )
-                    throw new Error("Sizing block reorganized");
+                  await verifyV4Quote(client, candidate, this.settings, {
+                    signal: searchSignal,
+                    check,
+                  });
+                  this.assertMarketApproval(market);
                   offer({
                     kind: "v4",
                     startToken: market.baseToken,
@@ -596,13 +587,21 @@ export class Runner {
                 }
               } catch (error) {
                 if (searchSignal.aborted) return;
-                quoteFailures++;
                 this.event("sizing_rejected", {
                   chainId,
                   poolId: pool.poolId,
                   venue: external.venue.name,
                   error: safeError(error),
                 });
+                // Preserve transient expiry/reorg classification through the
+                // drained read batch instead of escalating it into a minute-long
+                // chain-failure backoff. Actual RPC/quote failures still count.
+                if (
+                  error instanceof StaleCandidateError ||
+                  error instanceof ObsoleteScan
+                )
+                  throw error;
+                quoteFailures++;
               }
             },
             searchSignal,
@@ -805,21 +804,12 @@ export class Runner {
       return false;
     }
     candidate = selected;
-    if (candidate.quoteBlockHash) {
-      if (
-        (await client.getBlock({ blockNumber: candidate.blockNumber })).hash !==
-        candidate.quoteBlockHash
-      )
-        throw new ObsoleteScan("Refreshed pool state reorganized");
+    await verifyV4Quote(client, candidate, this.settings, {
+      signal: task?.signal,
+      check,
+    });
+    if (candidate.quoteBlockHash)
       task?.adoptQuote(candidate.blockNumber, candidate.quoteBlockHash);
-    }
-    assertFresh(
-      candidate,
-      await client.getBlockNumber(),
-      Date.now(),
-      this.settings.maxQuoteAgeMs,
-      this.settings.maxBlockLag,
-    );
     const aquaLeg = candidate.aquaFirst
       ? candidate.trade.first
       : candidate.trade.second;
