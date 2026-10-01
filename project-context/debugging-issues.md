@@ -160,3 +160,7 @@ credentials, verifies persisted state and starts the repaired image with the sam
 uncertain recovery leaves the worker stopped; it never deletes pending evidence or restores old
 history over a partial successful settlement. The new runtime still needs its exact-image build
 and owner-applied release before these source fixes describe the live service.
+
+## 2026-10-01: a healthy loop is not an eligible V4 market
+
+The Arbitrum USDC/DAI pool feed recovered from earlier indexer timeouts, but the worker still had no eligible V4 policy. The prior loop returned successfully without pricing anything and advanced `lastSuccess`. The isolated idle-status patch now reports a skipped check; it does not enable pools or change execution. See `v4-usdc-dai-readiness-20261001.md` for exact identity, remaining consent/allowlists, preserved original history work and the disabled configuration draft.

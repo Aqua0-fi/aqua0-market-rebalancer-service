@@ -97,6 +97,7 @@ export class Runner {
     if (typeof data.chainId !== "number") return;
     const stage: Record<string, string> = {
       scan_started: "Checking prices",
+      no_eligible_markets: "Waiting for an eligible approved market",
       opportunity_ready: "Opportunity found",
       opportunity: "Rechecking selected trade",
       signing: "Signing transaction",
@@ -128,6 +129,7 @@ export class Runner {
       "opportunity",
       "submitted",
       "reconciliation_blocked",
+      "no_eligible_markets",
       "operator_paused",
       "economic_paused",
       "chain_error",
@@ -322,7 +324,8 @@ export class Runner {
     this.event("scan_started", { chainId });
     try {
       task?.assertActive();
-      await this.scanChain(chainId, task);
+      const outcome = await this.scanChain(chainId, task);
+      if (outcome === "skipped") return false;
       this.errors.set(chainId, 0);
       this.retryAt.delete(chainId);
       this.metrics.lastSuccess = Date.now();
@@ -362,7 +365,10 @@ export class Runner {
       this.metrics.scanDurationMs = Date.now() - started;
     }
   }
-  private async scanChain(chainId: number, task?: ScanTask): Promise<void> {
+  private async scanChain(
+    chainId: number,
+    task?: ScanTask,
+  ): Promise<void | "skipped"> {
     const check = () => {
       task?.assertActive();
       if (this.controls?.paused(chainId))
@@ -428,8 +434,14 @@ export class Runner {
     if (
       !this.markets().some((m) => m.chainId === chainId) &&
       !this.swapVMMarkets().some((m) => m.market.chainId === chainId)
-    )
-      return;
+    ) {
+      this.event("no_eligible_markets", {
+        chainId,
+        reason:
+          "No approved market currently has a verified quoteable discovery record. Check the market catalog for the refusal reason.",
+      });
+      return "skipped";
+    }
     const config = execution ?? this.settings.quoteFees[String(chainId)];
     if (!config)
       throw new Error(

@@ -1,0 +1,10 @@
+{
+  "expectedVersion": 0,
+  "approved": false,
+  "classId": "10",
+  "baseToken": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+  "amounts": [],
+  "maxInput": "5000000",
+  "minNetProfit": "10000",
+  "note": "Disabled review draft for Arbitrum USDC/DAI. Preserves the observed 5 USDC executor cap. The proposed 0.01 USDC net floor is not a profitability claim or authorization to trade. Requires current identity, consent, route permissions and fee checks before any owner activation."
+}
