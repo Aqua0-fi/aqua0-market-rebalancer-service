@@ -42,6 +42,11 @@ contract MarketRebalancerForkTest is Test {
     address router;
     uint160 marketSqrt;
     uint256 amount;
+    uint24 poolFee;
+    int24 tickSpacing;
+    int24 lowerTick;
+    int24 upperTick;
+    uint128 jitLiquidity;
     uint256 signerPk = uint256(keccak256("aqua0.rebalancing.fork.signer"));
     uint256 strategistPk = uint256(keccak256("aqua0.rebalancing.fork.strategist"));
     uint256 constant CLASS = 1;
@@ -53,13 +58,32 @@ contract MarketRebalancerForkTest is Test {
         assertEq(block.chainid, vm.parseJsonUint(config, string.concat(row, ".chainId")));
         manager = IPoolManager(vm.parseJsonAddress(config, string.concat(row, ".poolManager")));
         router = vm.parseJsonAddress(config, string.concat(row, ".universalRouter"));
-        token0 = vm.parseJsonAddress(config, string.concat(row, ".pools[0].currency0"));
-        token1 = vm.parseJsonAddress(config, string.concat(row, ".pools[0].currency1"));
+        // Optional TEST-ONLY pair fixture. The default remains the original registry pair.
+        string memory pairPath = vm.envOr("FORK_PAIR_FIXTURE", string(""));
+        bool customPair = bytes(pairPath).length != 0;
+        string memory pairConfig = customPair ? vm.readFile(pairPath) : config;
+        string memory poolRow = customPair ? ".pool" : string.concat(row, ".pools[0]");
+        if (customPair) assertEq(vm.parseJsonUint(pairConfig, ".chainId"), block.chainid);
+        token0 = vm.parseJsonAddress(pairConfig, string.concat(poolRow, ".currency0"));
+        token1 = vm.parseJsonAddress(pairConfig, string.concat(poolRow, ".currency1"));
+        require(token0 < token1, "Unsorted fixture currencies");
+        uint256 fee = vm.parseJsonUint(pairConfig, string.concat(poolRow, ".fee"));
+        uint256 spacing = vm.parseJsonUint(pairConfig, string.concat(poolRow, ".tickSpacing"));
+        require(fee <= 1_000_000 && spacing > 0 && spacing <= 32767, "Invalid fixture pool key");
+        poolFee = uint24(fee);
+        tickSpacing = int24(int256(spacing));
+        lowerTick = (-887272 / tickSpacing) * tickSpacing;
+        upperTick = (887272 / tickSpacing) * tickSpacing;
+        uint256 testLiquidity = customPair ? vm.parseJsonUint(pairConfig, ".jitLiquidity") : 1e18;
+        require(testLiquidity > 0 && testLiquidity <= type(uint128).max, "Invalid fixture liquidity");
+        jitLiquidity = uint128(testLiquidity);
         address factory = vm.parseJsonAddress(
             config, string.concat(row, ".venues[", vm.toString(vm.envOr("FORK_VENUE_INDEX", uint256(0))), "].factory")
         );
         uint24[4] memory fees = [uint24(500), 3000, 100, 10000];
+        uint256 externalFee = customPair ? vm.parseJsonUint(pairConfig, ".externalFee") : 0;
         for (uint256 i; i < fees.length; i++) {
+            if (customPair && fees[i] != externalFee) continue;
             address candidate = IFactory(factory).getPool(token0, token1, fees[i]);
             if (candidate != address(0) && IMarketPool(candidate).liquidity() > 0) {
                 v3 = candidate;
@@ -86,8 +110,8 @@ contract MarketRebalancerForkTest is Test {
             "V4Adapter.sol", abi.encode(manager, address(registry), address(this), vm.addr(signerPk), "1"), hookAddress
         );
         hook = V4Adapter(hookAddress);
-        key = PoolKey(Currency.wrap(token0), Currency.wrap(token1), 3000, 60, IHooks(hookAddress));
-        hook.setJITPosition(key, -887220, 887220);
+        key = PoolKey(Currency.wrap(token0), Currency.wrap(token1), poolFee, tickSpacing, IHooks(hookAddress));
+        hook.setJITPosition(key, lowerTick, upperTick);
         hook.setJitTriggerRouterAllowed(router, true);
         _fund(vault0, token0);
         _fund(vault1, token1);
@@ -111,9 +135,12 @@ contract MarketRebalancerForkTest is Test {
             )
         );
         rebalancer.setOperator(address(this), true);
-        amount = IERC20Metadata(token0).decimals() >= 18 ? 0.01 ether : 10 * 10 ** IERC20Metadata(token0).decimals();
+        amount = customPair
+            ? vm.parseJsonUint(pairConfig, ".inputAmount")
+            : (IERC20Metadata(token0).decimals() >= 18 ? 0.01 ether : 10 * 10 ** IERC20Metadata(token0).decimals());
+        require(amount > 0 && amount <= type(uint128).max / 100, "Invalid test amount");
         rebalancer.setLimits(token0, amount * 100, 1);
-        rebalancer.setAquaPool(ExecutorPoolKey(token0, token1, 3000, 60, hookAddress), true);
+        rebalancer.setAquaPool(ExecutorPoolKey(token0, token1, poolFee, tickSpacing, hookAddress), true);
         rebalancer.setV3Pool(v3, true);
         rebalancer.setGasPriceLimit(100 gwei);
         rebalancer.setPaused(false);
@@ -121,6 +148,9 @@ contract MarketRebalancerForkTest is Test {
         emit log_named_uint("chain", block.chainid);
         emit log_named_uint("forkBlock", block.number);
         emit log_named_address("externalPool", v3);
+        emit log_named_uint("v4Fee", poolFee);
+        emit log_named_int("tickSpacing", tickSpacing);
+        emit log_named_uint("inputAmount", amount);
     }
 
     function _vault(address token) private returns (AssetVault) {
@@ -170,7 +200,7 @@ contract MarketRebalancerForkTest is Test {
 
     function _signed(bool zeroForOne, uint256 input) private view returns (bytes memory) {
         V4Types.V4Range[] memory ranges = new V4Types.V4Range[](1);
-        ranges[0] = V4Types.V4Range(-887220, 887220, 1e18);
+        ranges[0] = V4Types.V4Range(lowerTick, upperTick, jitLiquidity);
         uint160 sqrtLimit = zeroForOne ? 4295128740 : 1461446703485210103287273052203988822378723970341;
         V4Types.JITPayload memory p = V4Types.JITPayload(
             keccak256("testSwap"),
@@ -212,7 +242,7 @@ contract MarketRebalancerForkTest is Test {
             zeroForOne ? token1 : token0,
             input,
             1,
-            ExecutorPoolKey(token0, token1, 3000, 60, address(hook)),
+            ExecutorPoolKey(token0, token1, poolFee, tickSpacing, address(hook)),
             aqua ? _signed(zeroForOne, input) : bytes("")
         );
     }
