@@ -65,22 +65,34 @@
         "symbol": "MON",
         "decimals": 18
       },
+      "nativeEquivalent": {
+        "token": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
+        "decimals": 18
+      },
       "name": "Monad",
       "rpcEnv": "RPC_URL_MAINNET_MONAD",
-      "publicRpc": "https://rpc.monad.xyz",
+      "publicRpc": "https://rpc2.monad.xyz",
       "poolManager": "0x188d586Ddcf52439676Ca21A244753fA19F9Ea8e",
       "universalRouter": "0x0D97Dc33264bfC1c226207428A79b26757fb9dc3",
       "permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
-      "aqua0Hook": "0x027f56E669FBB2337557baeE210dbf79b87EC0C8",
+      "aqua0Hook": "0xA2bdf696822D4D97da31d936c8520d89B9A868c0",
       "extendedV4Encoding": false,
       "pools": [
         {
-          "poolId": "0x220d42f43359b15f13c223b1c56b9ad499df3804f5a7e3bf3652bed05cc9085f",
+          "poolId": "0x26d1028fae5935b2553bcd7299884fb2150e9f5b135059fe49b9b8222aa3daad",
+          "currency0": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+          "currency1": "0xe7cd86e13AC4309349F30B3435a9d337750fC82D",
+          "fee": 100,
+          "tickSpacing": 1,
+          "hooks": "0xA2bdf696822D4D97da31d936c8520d89B9A868c0"
+        },
+        {
+          "poolId": "0x33d51cd1a32eb4c25366b074a85b450bed2f6c15ae420a4d7215b8c399f7d799",
           "currency0": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
           "currency1": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",
           "fee": 3000,
           "tickSpacing": 60,
-          "hooks": "0x027f56E669FBB2337557baeE210dbf79b87EC0C8"
+          "hooks": "0xA2bdf696822D4D97da31d936c8520d89B9A868c0"
         }
       ],
       "venues": [
@@ -95,7 +107,13 @@
             10000
           ]
         }
-      ]
+      ],
+      "swapVM": {
+        "router": "0x111111338c5091E8440b67B168bAe16a668AC0De",
+        "aqua": "0x1111113CCf1426A8E30e2bfF5E005d929bF6a90a",
+        "maker": "0x2927dBC38387351956410adEad3E73ECa746c3BC",
+        "slices": 10
+      }
     },
     {
       "chainId": 4663,
